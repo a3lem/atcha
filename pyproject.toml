@@ -1,0 +1,16 @@
+[project]
+name = "team-mail"
+version = "0.1.0"
+description = "File-based email-lite for parallel coding agents"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+team-mail = "team_mail.cli.team_mail:main"
+
+[build-system]
+requires = ["uv_build>=0.9.18,<0.10"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = ["pytest"]

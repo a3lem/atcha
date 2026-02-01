@@ -1,0 +1,8 @@
+{
+  "name": "team-mail",
+  "version": "0.1.0",
+  "description": "File-based inter-agent messaging for parallel Claude Code sessions",
+  "author": {
+    "name": "a3lem"
+  }
+}
