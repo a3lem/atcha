@@ -4,9 +4,9 @@ File-based messaging between parallel Claude Code sessions. No MCP servers, no d
 
 ## How it works
 
-Each user has a directory with `profile.json` and a `mail/` subdirectory containing their inbox and sent messages. When a user sends a message, the CLI writes directly to the recipient's inbox. A PostToolUse hook checks for new messages after each tool call.
+Each agent has a directory with `profile.json` and a `mail/` subdirectory containing their inbox and sent messages. When an agent sends a message, the CLI writes directly to the recipient's inbox. A PostToolUse hook checks for new messages after each tool call.
 
-Authentication uses short random tokens stored as hashes. Set `$TEAM_MAIL_TOKEN` to authenticate as a user.
+Authentication uses short random tokens stored as hashes. Set `$TEAM_MAIL_TOKEN` to authenticate as an agent.
 
 ## Quick Start
 
@@ -15,36 +15,38 @@ Authentication uses short random tokens stored as hashes. Set `$TEAM_MAIL_TOKEN`
 ```bash
 cd your-project
 
-# Initialize with an admin password
-python cli/team_mail.py admin init --password secret123
+# Initialize (will prompt for password)
+team-mail init
+
+# Or with password directly
+team-mail init --password secret123
 ```
 
-This creates `.team-mail/` with the admin config, tokens directory, and users directory.
+This creates `.team-mail/` with the admin config, tokens directory, and agents directory.
 
-### 2. Get an admin token
+### 2. Set admin password
 
 ```bash
-# Mint an admin token (needed to create users)
-ADMIN_TOKEN=$(python cli/team_mail.py admin auth --admin --password secret123)
-export TEAM_MAIL_TOKEN=$ADMIN_TOKEN
+# Set admin password for subsequent commands
+export TEAM_MAIL_ADMIN_PASS=secret123
 ```
 
-### 3. Create users
+### 3. Create agents
 
 ```bash
-# Create a user (requires admin token)
-python cli/team_mail.py admin create maya-backend "Backend Engineer" --tags=backend,auth
+# Create an agent (requires admin password)
+team-mail agents add --name maya-backend --role "Backend Engineer" --tags=backend,auth
 
-# Create another user
-python cli/team_mail.py admin create alex-frontend "Frontend Dev" --tags=frontend,ui
+# Create another agent
+team-mail agents add --name alex-frontend --role "Frontend Dev" --tags=frontend,ui
 ```
 
-### 4. Get user tokens
+### 4. Get agent tokens
 
 ```bash
-# Get tokens for your users
-MAYA_TOKEN=$(python cli/team_mail.py admin auth --user maya-backend --password secret123)
-ALEX_TOKEN=$(python cli/team_mail.py admin auth --user alex-frontend --password secret123)
+# Get tokens for your agents
+MAYA_TOKEN=$(team-mail create-token --agent maya-backend)
+ALEX_TOKEN=$(team-mail create-token --agent alex-frontend)
 ```
 
 ### 5. Start collaborating
@@ -71,55 +73,59 @@ With the plugin installed, use slash commands instead of the CLI directly:
 | Command | Description |
 |---------|-------------|
 | `/init-workspace` | Initialize team-mail (sets admin password) |
-| `/register <description>` | Create new user from natural language description |
+| `/register <description>` | Create new agent from natural language description |
 | `/identify` | Show your identity (from token) |
 | `/signin --status="..." --tags=t1,t2` | Update your profile |
 | `/whoami` | Show your profile |
-| `/profile <username>` | View another user's profile |
-| `/send-mail <to> <message>` | Send a message to one user |
-| `/broadcast-mail [--tag=X] <message>` | Broadcast to all or tagged users |
-| `/team` | List all users with profiles |
+| `/profile <agent-name>` | View another agent's profile |
+| `/send-mail <to> <message>` | Send a message to one agent |
+| `/broadcast-mail [--tag=X] <message>` | Broadcast to all or tagged agents |
+| `/team` | List all agents with profiles |
 | `/tags` | List all tags with counts |
 | `/check-mail` | Read inbox and mark as read |
 
 ## CLI Reference
 
-### Admin commands (require password)
+### Setup commands (require admin password)
 
 ```bash
-# Initialize system
-python cli/team_mail.py admin init --password <password>
+# Initialize system (prompts for password if not provided)
+team-mail init
+team-mail init --password <password>
+
+# Check if initialized (useful in hooks)
+team-mail init --check  # exits 0 if initialized, 1 if not
 
 # Change password
-python cli/team_mail.py admin password --old <old> --new <new>
+team-mail admin password --old <old> --new <new>
 
-# Mint tokens
-python cli/team_mail.py admin auth --admin --password <password>
-python cli/team_mail.py admin auth --user <username> --password <password>
+# Create agent token
+team-mail create-token --agent <agent-name>
 
-# Create user (requires admin token in $TEAM_MAIL_TOKEN)
-python cli/team_mail.py admin create <username> <title> [--status=...] [--tags=...] [--about=...]
+# Create agent (requires TEAM_MAIL_ADMIN_PASS or --password)
+team-mail agents add --name <name> --role <role> [--status=...] [--tags=...] [--about=...]
 ```
 
-### User commands (require token in $TEAM_MAIL_TOKEN)
+### Agent commands (require token in $TEAM_MAIL_TOKEN)
 
 ```bash
-# List all users
-python cli/team_mail.py users list
+# List all agents
+team-mail agents list
 
 # View profiles
-python cli/team_mail.py profile show         # Your profile
-python cli/team_mail.py users get <username> # Someone else's (no token needed)
+team-mail profile show         # Your profile
+team-mail whoami               # Alias for profile show
+team-mail agents get <agent-name> # Someone else's (no token needed)
 
 # Update profile
-python cli/team_mail.py profile update --status="Working on auth" --tags=backend,api
+team-mail profile update --status="Working on auth" --tags=backend,api
 
 # Check inbox
-python cli/team_mail.py inbox                # Summary
-python cli/team_mail.py inbox read           # Full messages, marks as read
+team-mail inbox                # Summary
+team-mail inbox read           # Full messages, marks as read
 
 # Send message
-python cli/team_mail.py send <recipient> "<message>"
+team-mail send <recipient> "<message>"
 ```
 
 ## Directory structure
@@ -129,8 +135,8 @@ python cli/team_mail.py send <recipient> "<message>"
 ├── admin.json              # {"password_hash": "...", "salt": "..."}
 ├── tokens/
 │   ├── _admin              # Hash of admin token
-│   └── maya-backend        # Hash of user token
-└── users/
+│   └── maya-backend        # Hash of agent token
+└── agents/
     ├── maya-backend/
     │   ├── profile.json
     │   └── mail/
@@ -141,7 +147,7 @@ python cli/team_mail.py send <recipient> "<message>"
         └── ...
 ```
 
-## Username format
+## Agent name format
 
 Names follow the pattern `{firstname}-{role-slug}`:
 - `maya-backend-engineer`
@@ -173,8 +179,9 @@ export TEAM_MAIL_TOKEN=$ALEX_TOKEN
 | Variable | Description |
 |----------|-------------|
 | `TEAM_MAIL_DIR` | Path to `.team-mail/` directory (auto-discovered if not set) |
-| `TEAM_MAIL_TOKEN` | Authentication token for the current user |
-| `TEAM_MAIL_CLI` | Path to `cli/team_mail.py` (set by SessionStart hook) |
+| `TEAM_MAIL_TOKEN` | Authentication token for the current agent |
+| `TEAM_MAIL_ADMIN_PASS` | Admin password (alternative to `--password` for admin operations) |
+| `TEAM_MAIL_CLI` | Path to CLI script (set by SessionStart hook for plugin) |
 
 ## Message format
 

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "agent-team-mail",
+  "owner": {
+    "name": "Adriaan",
+    "email": "a3lem@pm.me"
+  },
+  "metadata": {"description": "Personal collection of Claude Code plugins"},
+  "plugins": [
+    {
+      "name": "agent-team-mail",
+      "source": "./extras/claude-plugin",
+      "description": "File-based inter-agent messaging for parallel Claude Code sessions"
+    }
+  ]
+}
