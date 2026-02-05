@@ -19,9 +19,9 @@ Each user gets a directory under `.atcha/users/` with their profile and mail. Se
 ├── admin.json              # {"password_hash": "...", "salt": "..."}
 ├── tokens/
 │   ├── _admin              # hash of admin token
-│   └── <user-name>         # hash of user token
+│   └── <user-id>           # hash of user token (e.g., usr-a3k9m)
 └── users/
-    └── <user-name>/
+    └── <user-id>/          # directory named by user id (e.g., usr-a3k9m)
         ├── profile.json
         └── mail/
             ├── inbox.jsonl
@@ -33,7 +33,7 @@ Each user gets a directory under `.atcha/users/` with their profile and mail. Se
 
 ```json
 {
-  "id": "maya-backend-engineer",
+  "id": "usr-a3k9m",
   "name": "maya",
   "role": "Backend Engineer",
   "status": "Refactoring auth module",
@@ -50,28 +50,21 @@ The filesystem is the registry — a user exists if their directory exists.
 
 Each user has two identifiers:
 - **name**: The user's unique name (e.g., `maya`), always unique across all users
-- **id**: Full identifier `{name}-{role-slug}` (e.g., `maya-backend-engineer`), used as directory name
+- **id**: Random alphanumeric identifier (e.g., `usr-a3k9m`), auto-generated and immutable
 
-The name is the primary identifier. The id adds role context to help understand what the user does.
+The name is the primary identifier for human-readable commands. The id is used as the directory name and is randomly generated when the user is created.
 
 Both can be used interchangeably in CLI commands:
 ```bash
-atcha contacts maya                   # by name (preferred)
-atcha contacts maya-backend-engineer  # by id (more descriptive)
-atcha send --to maya "Hello"          # by name
+atcha contacts maya        # by name (preferred)
+atcha contacts usr-a3k9m   # by id
+atcha send --to maya "Hello"
 ```
 
 Examples:
-- `maya-backend-engineer` (name: `maya`, role: Backend Engineer)
-- `alex-frontend-specialist` (name: `alex`, role: Frontend Specialist)
-- `kai-auth-expert` (name: `kai`, role: Auth Expert)
-
-Validation rules for id:
-- Lowercase letters, numbers, and dashes only
-- 3-40 characters
-- No consecutive dashes
-- No leading/trailing dashes
-- The name (first component) must be unique across all users
+- `maya` (name) → `usr-a3k9m` (id), role: Backend Engineer
+- `alex` (name) → `usr-7x2pq` (id), role: Frontend Specialist
+- `kai` (name) → `usr-3n8qr` (id), role: Auth Expert
 
 ### Authentication model
 
@@ -85,8 +78,8 @@ Validation rules for id:
 
 ### Message flow
 
-1. Agent A (authenticated via token) runs `/send-mail alex-frontend "Changed auth exports"`
-2. The CLI uses the token to identify the sender and appends to `alex-frontend/mail/inbox.jsonl`
+1. Agent A (authenticated via token) sends a message to alex
+2. The CLI uses the token to identify the sender and appends to `alex/mail/inbox.jsonl` (using alex's user directory)
 3. A copy goes to sender's `mail/sent.jsonl` atomically
 4. On agent B's next tool call, the `check-inbox.sh` hook fires, sees the new message, and prints it to stdout
 5. Agent B runs `/check-mail` (which uses `messages read`) to read and mark messages as read
@@ -96,7 +89,6 @@ Validation rules for id:
 - `ATCHA_DIR` — absolute path to `.atcha/` directory. Auto-discovered by SessionStart hook.
 - `ATCHA_TOKEN` — authentication token for the current agent.
 - `ATCHA_ADMIN_PASS` — admin password (for admin operations without `--password`).
-- `ATCHA_CLI` — (plugin only) absolute path to CLI script. Set by SessionStart hook.
 
 When the package is installed (`uv sync` or `pip install -e .`), use `atcha` directly.
 
@@ -169,7 +161,7 @@ Notes:
 - `messages read [IDs]` reads only specific messages by ID.
 - `messages read` excludes the `to` field by default (it's redundant). When admin impersonates, `to` is included.
 - Filters: `--since` (ISO timestamp), `--from` (sender agent name), `--include-read` (include already-read messages).
-- Message field: `content` (old `body` field is still readable for backward compatibility).
+- Message field: `content`.
 
 ### Utility commands
 
@@ -187,21 +179,9 @@ AVAILABLE: <options if applicable>
 FIX: <how to recover>
 ```
 
-## Slash Commands
+## Claude Code Skill
 
-Commands handle high-level workflows, using CLI primitives under the hood.
-
-| Command | Purpose |
-|---------|---------|
-| `/init-workspace` | Initialize atcha (sets admin password) |
-| `/register` | Create new user (Claude generates name/role) |
-| `/identify` | Show your identity (from token) |
-| `/signin` | Update profile (status, tags, about) |
-| `/send-mail` | Send message to one user |
-| `/broadcast-mail` | Send to all or tagged users |
-| `/team` | List all users with profiles |
-| `/tags` | List tags with counts |
-| `/check-mail` | Read inbox, mark as read |
+The Claude Code skill in `extras/claude-plugin/skills/atcha/` provides a simplified interface to the CLI for common operations. See `SKILL.md` and `ADMIN.md` in that directory for detailed documentation on using atcha with Claude Code.
 
 ## Design decisions
 
@@ -213,9 +193,9 @@ The previous trust-the-LLM model relied on the agent remembering to use `--as <n
 - Tokens can be revoked by deleting the hash file
 - Compatible with multi-agent orchestration
 
-### Why primitives + commands
+### Why primitives + skill
 
-The CLI provides mechanical operations (file I/O, auth, timestamps). Commands let Claude handle creative work (name generation, message formatting). This separation keeps the CLI simple and testable while giving commands flexibility.
+The CLI provides mechanical operations (file I/O, auth, timestamps). The Claude Code skill lets Claude handle higher-level workflows and user interaction. This separation keeps the CLI simple and testable while giving the skill flexibility.
 
 ### Why filesystem instead of database
 
@@ -238,7 +218,7 @@ The `check-inbox.sh` hook uses `messages read` which marks messages as read. Thi
 | Path | Purpose |
 |------|---------|
 | `src/atcha/cli/atcha.py` | Python CLI (stdlib-only) |
-| `extras/claude-plugin/commands/*.md` | Slash commands |
+| `extras/claude-plugin/skills/atcha/` | Claude Code skill |
 | `extras/claude-plugin/hooks/session-start.sh` | Auto-discover `.atcha/`, show identity |
 | `extras/claude-plugin/hooks/check-inbox.sh` | PostToolUse — surface new messages |
 | `tests/test_atcha.py` | pytest tests for CLI |
@@ -252,7 +232,9 @@ The `check-inbox.sh` hook uses `messages read` which marks messages as read. Thi
 
 ```bash
 # Install
-uv sync  # or: pip install -e .
+git clone <repo-url>
+cd agent-team-mail
+uv tool install -e .
 
 # Initialize (first time, will prompt for password)
 atcha init
@@ -263,11 +245,10 @@ atcha init --password mypassword
 export ATCHA_ADMIN_PASS=mypassword
 
 # Create a user
-atcha admin users add --name maya-backend --role "Backend Engineer"
+atcha admin users add --name maya --role "Backend Engineer"
 
-# Get user token
-USER_TOKEN=$(atcha create-token --user maya-backend)
-export ATCHA_TOKEN=$USER_TOKEN
+# Get user token and use it
+export ATCHA_TOKEN=$(atcha create-token --user maya)
 
 # Check your identity
 atcha whoami
@@ -277,10 +258,10 @@ atcha contacts $(atcha whoami)
 atcha contacts
 
 # View a specific user
-atcha contacts alex-frontend
+atcha contacts alex
 
 # Send a message
-atcha send --to alex-frontend "API is ready"
+atcha send --to alex "API is ready"
 
 # Check inbox
 atcha messages check

@@ -1,6 +1,6 @@
 # atcha
 
-File-based messaging between parallel Claude Code sessions. No MCP servers, no daemons, no databases — just JSONL files, a Python CLI, and token-based authentication.
+File-based messaging between parallel AI agent sessions. No MCP servers, no daemons, no databases — just JSONL files, a Python CLI, and token-based authentication.
 
 ## How it works
 
@@ -10,12 +10,20 @@ Authentication uses short random tokens stored as hashes. Set `$ATCHA_TOKEN` to 
 
 ## Quick Start
 
-### 1. Initialize the system
+### 1. Install
 
 ```bash
-cd your-project
+git clone <repo-url>
+cd agent-team-mail
+uv tool install -e .
+```
 
-# Initialize (will prompt for password)
+This installs the `atcha` command in your local bin.
+
+### 2. Initialize the system
+
+```bash
+# Initialize (will prompt for admin password)
 atcha init
 
 # Or with password directly
@@ -24,65 +32,79 @@ atcha init --password secret123
 
 This creates `.atcha/` with the admin config, tokens directory, and users directory.
 
-### 2. Set admin password
+### 3. Set admin password
 
 ```bash
 # Set admin password for subsequent commands
 export ATCHA_ADMIN_PASS=secret123
 ```
 
-### 3. Create users
+### 4. Create users
 
 ```bash
 # Create a user (requires admin password)
-atcha admin users add --name maya-backend --role "Backend Engineer" --tags=backend,auth
+atcha admin users add --name maya --role "Backend Engineer" --tags=backend,auth
 
 # Create another user
-atcha admin users add --name alex-frontend --role "Frontend Dev" --tags=frontend,ui
+atcha admin users add --name alex --role "Frontend Dev" --tags=frontend,ui
 ```
 
-### 4. Get user tokens
+### 5. Get user token and start using atcha
 
 ```bash
-# Get tokens for your users
-USER_MAYA_TOKEN=$(atcha create-token --user maya-backend)
-USER_ALEX_TOKEN=$(atcha create-token --user alex-frontend)
-```
+# Get token for a specific user (give this token only to that user)
+atcha create-token --user maya
+# → a3k9m
 
-### 5. Start collaborating
+# Use the token to authenticate as that user
+export ATCHA_TOKEN=a3k9m
 
-```bash
-# As Maya, send a message to Alex
-export ATCHA_TOKEN=$USER_MAYA_TOKEN
-python cli/atcha.py send --to alex-frontend "Auth API is ready for integration"
+# Send a message
+atcha send --to alex "Auth API is ready for integration"
 
-# As Alex, check inbox
-export ATCHA_TOKEN=$USER_ALEX_TOKEN
+# Check inbox
 atcha messages check
-# → 1 unread message from maya-backend
+# → 1 unread message from alex
 
 # Read messages (marks as read)
 atcha messages read
-# → {"from":"maya-backend","to":["alex-frontend"],"ts":"...","type":"message","content":"Auth API is ready for integration"}
+# → {"from":"alex","ts":"...","type":"message","content":"Thanks, will integrate today"}
 ```
+
+**Security note:** Each user should only have access to their own token. Never store multiple user tokens in the same environment.
 
 ## Using with Claude Code
 
-With the plugin installed, use slash commands instead of the CLI directly:
+Install the Claude Code skill from `extras/claude-plugin/skills/atcha/` to use atcha with Claude Code. The skill provides a simplified interface to the CLI commands for common operations like sending messages and checking your inbox.
 
-| Command | Description |
-|---------|-------------|
-| `/init-workspace` | Initialize atcha (sets admin password) |
-| `/register <description>` | Create new user from natural language description |
-| `/identify` | Show your identity (from token) |
-| `/signin --status="..." --tags=t1,t2` | Update your profile |
-| `/whoami` | Show your profile |
-| `/profile <user-name>` | View another user's profile |
-| `/send-mail <to> <message>` | Send a message to one user |
-| `/broadcast-mail [--tag=X] <message>` | Broadcast to all or tagged users |
-| `/team` | List all users with profiles |
-| `/tags` | List all tags with counts |
-| `/check-mail` | Read inbox and mark as read |
+### Running as a user
+
+Launch Claude Code with a user token to give the agent a specific identity. The agent can send and receive messages but cannot create users or impersonate others.
+
+```bash
+ATCHA_TOKEN=$(atcha create-token --user bashir --password test) claude
+```
+
+The agent never knows the admin password and cannot impersonate other users.
+
+### Running as an admin
+
+Launch Claude Code with the admin password to enable user management. This is useful for setting up the system and creating users.
+
+```bash
+ATCHA_ADMIN_PASS=test claude
+```
+
+Example prompt to an agent with admin powers:
+
+```
+Create two new atcha users:
+
+  - Anna. Specialized in CLI design for AI agents. Agent Anna takes into account the needs of LLMs.
+  - Bashir. New agent on the team. Will ask questions. Fresh pair of eyes.
+```
+
+The agent will create the users with appropriate names, roles, and descriptions.
 
 ## CLI Reference
 
@@ -103,7 +125,7 @@ atcha admin password --old <old> --new <new>
 atcha create-token --user <user-name>
 
 # Create user (requires ATCHA_ADMIN_PASS or --password)
-atcha admin users add --name <name> --role <role> [--status=...] [--tags=...] [--about=...]
+atcha admin users add --name <short-name> --role <role> [--status=...] [--tags=...] [--about=...]
 ```
 
 ### User commands (require token in $ATCHA_TOKEN)
@@ -136,44 +158,50 @@ atcha send --to <recipient> "<message>"
 ├── admin.json              # {"password_hash": "...", "salt": "..."}
 ├── tokens/
 │   ├── _admin              # Hash of admin token
-│   └── maya-backend        # Hash of user token
+│   └── usr-a3k9m           # Hash of user token
 └── users/
-    ├── maya-backend/
+    ├── usr-a3k9m/
     │   ├── profile.json
     │   └── mail/
     │       ├── inbox.jsonl
     │       ├── sent.jsonl
     │       └── state.json
-    └── alex-frontend/
+    └── usr-7x2pq/
         └── ...
 ```
 
-## User name format
+## User identifiers
 
-Names follow the pattern `{firstname}-{role-slug}`:
-- `maya-backend-engineer`
-- `alex-frontend-specialist`
-- `kai-auth-expert`
+Each user has a **name** (short, unique identifier like `maya`) and an **id** (random alphanumeric sequence). The id is auto-generated when the user is created.
 
-Validation rules:
-- Lowercase letters, numbers, and dashes only
-- 3-40 characters
-- No consecutive dashes
-- No leading/trailing dashes
+Both name and id can be used in commands:
+```bash
+atcha contacts maya        # by name (preferred)
+atcha contacts usr-7x3km   # by id
+atcha send --to maya "Hello"
+```
+
+Examples:
+- Name: `maya`, ID: `a3k9m`
+- Name: `alex`, ID: `7x2pq`
+
+The name must be unique across all users. The id is randomly generated and immutable.
 
 ## Multi-worktree setup
 
 Each git worktree can have its own `.atcha/` directory, or they can share one. Set `$ATCHA_DIR` to point to a shared directory:
 
 ```bash
-# Worktree A - Backend engineer
+# Worktree A - Maya's session
 export ATCHA_DIR=/path/to/shared/.atcha
-export ATCHA_TOKEN=$USER_MAYA_TOKEN
+export ATCHA_TOKEN=a3k9m  # Maya's token
 
-# Worktree B - Frontend engineer
+# Worktree B - Alex's session
 export ATCHA_DIR=/path/to/shared/.atcha
-export ATCHA_TOKEN=$USER_ALEX_TOKEN
+export ATCHA_TOKEN=7x2pq  # Alex's token
 ```
+
+Each worktree should only have access to one user's token.
 
 ## Environment variables
 
@@ -182,20 +210,18 @@ export ATCHA_TOKEN=$USER_ALEX_TOKEN
 | `ATCHA_DIR` | Path to `.atcha/` directory (auto-discovered if not set) |
 | `ATCHA_TOKEN` | Authentication token for the current user |
 | `ATCHA_ADMIN_PASS` | Admin password (alternative to `--password` for admin operations) |
-| `ATCHA_CLI` | Path to CLI script (set by SessionStart hook for plugin) |
 
 ## Message format
 
-```json
-{"id":"msg-abc12345","thread_id":"msg-abc12345","from":"maya-backend","to":["alex-frontend"],"ts":"2026-01-27T10:00:00Z","type":"message","content":"Changed auth exports"}
-```
+Messages use the `content` field for message body:
 
-Note: Old messages with `body` field are still readable for backward compatibility.
+```json
+{"id":"msg-abc12345","thread_id":"msg-abc12345","from":"maya","to":["alex"],"ts":"2026-01-27T10:00:00Z","type":"message","content":"Changed auth exports"}
+```
 
 ## Development
 
 ```bash
-cd plugins/atcha
 uv sync
 uv run pytest tests/ -v
 ```
@@ -203,4 +229,4 @@ uv run pytest tests/ -v
 ## Requirements
 
 - Python 3.11+
-- uv (for running tests and CLI)
+- uv
