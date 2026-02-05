@@ -1,16 +1,16 @@
 #!/bin/bash
-# team-mail: Show identity at session start
+# atcha: Show identity at session start
 
 # Show identity if token is set
-if [ -n "$TEAM_MAIL_TOKEN" ]; then
-  IDENTITY=$(team-mail whoami 2>/dev/null)
+if [ -n "$ATCHA_TOKEN" ]; then
+  IDENTITY=$(atcha whoami 2>/dev/null)
 
-  echo "You are logged into team-mail"
-  
+  echo "You are logged into atcha"
+
   if [ -n "$IDENTITY" ]; then
     echo "$IDENTITY"
     echo ""
-    echo "Use the /team-mail skill to message teammates."
+    echo "Use the /atcha skill to message teammates."
   fi
 fi
 

@@ -1,27 +1,27 @@
-# team-mail
+# atcha
 
 ## What this is
 
 A file-based messaging system for parallel Claude Code sessions. Agents running in separate git worktrees can send each other messages through JSONL files on the filesystem. No MCP servers, no daemons, no databases.
 
-The Python CLI (`team-mail`) provides a hierarchical command structure with token-based authentication. Claude Code commands handle higher-level logic like name generation and message formatting.
+The Python CLI (`atcha`) provides a hierarchical command structure with token-based authentication. Claude Code commands handle higher-level logic like name generation and message formatting.
 
 ## Architecture
 
-A `.team-mail/` directory lives at the project root and contains admin config, tokens, and agent data. Agents authenticate via tokens stored in `$TEAM_MAIL_TOKEN`.
+A `.atcha/` directory lives at the project root and contains admin config, tokens, and agent data. Agents authenticate via tokens stored in `$ATCHA_TOKEN`.
 
-Each agent gets a directory under `.team-mail/agents/` with their profile and mail. Sending a message means appending a JSON line directly to the recipient's `inbox.jsonl`. A PostToolUse hook checks for new messages after every tool call.
+Each user gets a directory under `.atcha/users/` with their profile and mail. Sending a message means appending a JSON line directly to the recipient's `inbox.jsonl`. A PostToolUse hook checks for new messages after every tool call.
 
 ### Directory structure
 
 ```
-.team-mail/
+.atcha/
 ├── admin.json              # {"password_hash": "...", "salt": "..."}
 ├── tokens/
 │   ├── _admin              # hash of admin token
-│   └── <agent-name>        # hash of agent token
-└── agents/
-    └── <agent-name>/
+│   └── <user-name>         # hash of user token
+└── users/
+    └── <user-name>/
         ├── profile.json
         └── mail/
             ├── inbox.jsonl
@@ -44,21 +44,21 @@ Each agent gets a directory under `.team-mail/agents/` with their profile and ma
 }
 ```
 
-The filesystem is the registry — an agent exists if their directory exists.
+The filesystem is the registry — a user exists if their directory exists.
 
-### Agent identifiers
+### User identifiers
 
-Each agent has two identifiers:
-- **name**: The agent's unique name (e.g., `maya`), always unique across all agents
+Each user has two identifiers:
+- **name**: The user's unique name (e.g., `maya`), always unique across all users
 - **id**: Full identifier `{name}-{role-slug}` (e.g., `maya-backend-engineer`), used as directory name
 
-The name is the primary identifier. The id adds role context to help understand what the agent does.
+The name is the primary identifier. The id adds role context to help understand what the user does.
 
 Both can be used interchangeably in CLI commands:
 ```bash
-team-mail agents get maya                   # by name (preferred)
-team-mail agents get maya-backend-engineer  # by id (more descriptive)
-team-mail send maya "Hello"                 # by name
+atcha contacts maya                   # by name (preferred)
+atcha contacts maya-backend-engineer  # by id (more descriptive)
+atcha send --to maya "Hello"          # by name
 ```
 
 Examples:
@@ -71,17 +71,17 @@ Validation rules for id:
 - 3-40 characters
 - No consecutive dashes
 - No leading/trailing dashes
-- The name (first component) must be unique across all agents
+- The name (first component) must be unique across all users
 
 ### Authentication model
 
-- Admin authenticates with password (`--password` or `$TEAM_MAIL_ADMIN_PASS`)
-- Agents authenticate with tokens (`--token` or `$TEAM_MAIL_TOKEN`)
-- Password stored as hash in `.team-mail/admin.json`
-- Agent tokens are deterministically derived from `HMAC(password, agent_id, salt)`
+- Admin authenticates with password (`--password` or `$ATCHA_ADMIN_PASS`)
+- Users authenticate with tokens (`--token` or `$ATCHA_TOKEN`)
+- Password stored as hash in `.atcha/admin.json`
+- User tokens are deterministically derived from `HMAC(password, user_id, salt)`
 - Token files store SHA-256 hashes, not plaintext tokens
-- Same password + agent always produces the same token (idempotent)
-- Agents cannot read each other's tokens (only hashes are stored)
+- Same password + user always produces the same token (idempotent)
+- Users cannot read each other's tokens (only hashes are stored)
 
 ### Message flow
 
@@ -89,16 +89,16 @@ Validation rules for id:
 2. The CLI uses the token to identify the sender and appends to `alex-frontend/mail/inbox.jsonl`
 3. A copy goes to sender's `mail/sent.jsonl` atomically
 4. On agent B's next tool call, the `check-inbox.sh` hook fires, sees the new message, and prints it to stdout
-5. Agent B runs `/check-mail` (which uses `inbox read`) to read and mark messages as read
+5. Agent B runs `/check-mail` (which uses `messages read`) to read and mark messages as read
 
 ### Env vars
 
-- `TEAM_MAIL_DIR` — absolute path to `.team-mail/` directory. Auto-discovered by SessionStart hook.
-- `TEAM_MAIL_TOKEN` — authentication token for the current agent.
-- `TEAM_MAIL_ADMIN_PASS` — admin password (for admin operations without `--password`).
-- `TEAM_MAIL_CLI` — (plugin only) absolute path to CLI script. Set by SessionStart hook.
+- `ATCHA_DIR` — absolute path to `.atcha/` directory. Auto-discovered by SessionStart hook.
+- `ATCHA_TOKEN` — authentication token for the current agent.
+- `ATCHA_ADMIN_PASS` — admin password (for admin operations without `--password`).
+- `ATCHA_CLI` — (plugin only) absolute path to CLI script. Set by SessionStart hook.
 
-When the package is installed (`uv sync` or `pip install -e .`), use `team-mail` directly.
+When the package is installed (`uv sync` or `pip install -e .`), use `atcha` directly.
 
 ## CLI Commands
 
@@ -107,62 +107,69 @@ The CLI provides a hierarchical structure with token-based authentication.
 ### Authentication options
 
 **Admin operations** (create agents, mint tokens):
-- `--password <pw>` or `$TEAM_MAIL_ADMIN_PASS`
+- `--password <pw>` or `$ATCHA_ADMIN_PASS`
 
 **Agent operations** (profile, inbox, send):
-- `--token <token>` or `$TEAM_MAIL_TOKEN`
+- `--token <token>` or `$ATCHA_TOKEN`
 
-Priority: password/TEAM_MAIL_ADMIN_PASS > token/TEAM_MAIL_TOKEN
+Priority: password/ATCHA_ADMIN_PASS > token/ATCHA_TOKEN
 
 ### Admin impersonation
 
-Commands that self-identify (inbox, send) accept `--user <name>` with admin auth:
+Commands that self-identify (messages, send) accept `--user <name>` with admin auth:
 
 ```bash
 # Check alice's inbox as admin
-team-mail inbox --password=secret --user=alice
+atcha messages --password=secret --user=alice check
 
 # Send from alice to bob as admin
-team-mail send --password=secret --user=alice bob "Hello"
+atcha send --password=secret --user=alice --to bob "Hello"
 
 # Update alice's profile as admin
-team-mail agents update --password=secret --name=alice --status="On vacation"
+atcha profile update --password=secret --name=alice --status="On vacation"
 ```
 
 ### Setup commands (require admin password)
 
 | Command | Arguments | Output | Purpose |
 |---------|-----------|--------|---------|
-| `init` | `[--password <pw>]` | status | First-time setup, creates `.team-mail/`. Prompts if no password |
+| `init` | `[--password <pw>]` | status | First-time setup, creates `.atcha/`. Prompts if no password |
 | `init` | `--check` | status | Check if initialized (exit 0 if yes, 1 if no). Useful in hooks |
-| `create-token` | `--agent <name>` | token | Create agent token |
+| `create-token` | `--user <name>` | token | Create user token |
 | `admin password` | `--old <pw> --new <pw>` | status | Change admin password |
 
-### Agents commands (discover and manage agents)
+### Contact and profile commands
 
 | Command | Arguments | Output | Purpose |
 |---------|-----------|--------|---------|
-| `agents list` | `[--names-only] [--include-self] [--tags=x] [--full]` | JSON array | List agents (excludes self by default) |
-| `agents get` | `<name> [--full]` | JSON | View an agent's profile |
-| `agents add` | `--name <name> --role <role>` + optional flags | JSON | Add agent (admin only) |
-| `agents update` | `[--name <name>] --status/--role/--tags/--about` | JSON | Update agent profile |
+| `contacts` | `[--names-only] [--include-self] [--tags=x] [--full]` | JSON array | List all contacts (excludes self by default) |
+| `contacts` | `<name> [--full]` | JSON | View a contact's profile |
+| `admin users add` | `--name <name> --role <role>` + optional flags | JSON | Add new user (admin only) |
+| `profile update` | `[--name <name>] --status/--role/--tags/--about` | JSON | Update profile |
 
 Notes:
-- `agents list` excludes the current agent by default. Use `--include-self` to include yourself. Admin sees all.
+- `contacts` with no arguments lists all users, excluding self by default. Use `--include-self` to include yourself.
+- `contacts <name>` shows a specific user's profile.
 - `--full` includes all fields (dates and empty values, hidden by default).
-- `agents update` without `--name` updates your own profile (requires token). With `--name`, requires admin auth.
+- `profile update` without `--name` updates your own profile (requires token). With `--name`, requires admin auth.
 
 ### Mail commands (require agent token)
 
 | Command | Arguments | Output | Purpose |
 |---------|-----------|--------|---------|
-| `inbox` | — | summary | Check inbox (count + senders) |
-| `inbox read` | `[--since=TS] [--from=agent] [--include-read]` | JSONL | Read messages, mark as read |
-| `send` | `<to> <body>` | JSON | Send message |
+| `messages check` | — | summary | Check inbox (count + senders) |
+| `messages list` | `[--from=user] [--thread=id] [--limit=N] [--all] [--no-preview]` | JSON array | List messages with previews (no side effects) |
+| `messages read` | `[IDs...] [--since=TS] [--from=user] [--include-read] [--no-mark]` | JSONL | Read messages, mark as read |
+| `send` | `--to <name> <content>` | JSON | Send message |
 
 Notes:
-- `inbox read` excludes the `to` field by default (it's redundant). When admin impersonates, `to` is included.
+- `messages list` returns JSON array with `preview` field (50 chars + "..."). Use `--no-preview` for full `content`.
+- `messages list` does NOT mark messages as read (no side effects).
+- `messages read` marks messages as read. Use `--no-mark` to prevent this.
+- `messages read [IDs]` reads only specific messages by ID.
+- `messages read` excludes the `to` field by default (it's redundant). When admin impersonates, `to` is included.
 - Filters: `--since` (ISO timestamp), `--from` (sender agent name), `--include-read` (include already-read messages).
+- Message field: `content` (old `body` field is still readable for backward compatibility).
 
 ### Utility commands
 
@@ -186,13 +193,13 @@ Commands handle high-level workflows, using CLI primitives under the hood.
 
 | Command | Purpose |
 |---------|---------|
-| `/init-workspace` | Initialize team-mail (sets admin password) |
-| `/register` | Create new agent (Claude generates name/role) |
+| `/init-workspace` | Initialize atcha (sets admin password) |
+| `/register` | Create new user (Claude generates name/role) |
 | `/identify` | Show your identity (from token) |
 | `/signin` | Update profile (status, tags, about) |
-| `/send-mail` | Send message to one agent |
-| `/broadcast-mail` | Send to all or tagged agents |
-| `/team` | List all agents with profiles |
+| `/send-mail` | Send message to one user |
+| `/broadcast-mail` | Send to all or tagged users |
+| `/team` | List all users with profiles |
 | `/tags` | List tags with counts |
 | `/check-mail` | Read inbox, mark as read |
 
@@ -212,7 +219,7 @@ The CLI provides mechanical operations (file I/O, auth, timestamps). Commands le
 
 ### Why filesystem instead of database
 
-The filesystem is self-describing — an agent exists if their directory exists. You can inspect the entire system state with `ls` and `cat`.
+The filesystem is self-describing — a user exists if their directory exists. You can inspect the entire system state with `ls` and `cat`.
 
 ### Why atomic send
 
@@ -224,17 +231,17 @@ An MCP server would give cleaner tool APIs and in-memory state, but it introduce
 
 ### Why the hook marks messages as read
 
-The `check-inbox.sh` hook now reads messages AND marks them as read. This is deliberate — agents should see each message once. Use `inbox` (without `read`) for a summary without marking as read.
+The `check-inbox.sh` hook uses `messages read` which marks messages as read. This is deliberate — agents should see each message once. Use `messages check` for a summary without marking as read, or `messages list` for full details without marking as read.
 
 ## Components
 
 | Path | Purpose |
 |------|---------|
-| `src/team_mail/cli/team_mail.py` | Python CLI (stdlib-only) |
+| `src/atcha/cli/atcha.py` | Python CLI (stdlib-only) |
 | `extras/claude-plugin/commands/*.md` | Slash commands |
-| `extras/claude-plugin/hooks/session-start.sh` | Auto-discover `.team-mail/`, show identity |
+| `extras/claude-plugin/hooks/session-start.sh` | Auto-discover `.atcha/`, show identity |
 | `extras/claude-plugin/hooks/check-inbox.sh` | PostToolUse — surface new messages |
-| `tests/test_team_mail.py` | pytest tests for CLI |
+| `tests/test_atcha.py` | pytest tests for CLI |
 
 ## Requirements
 
@@ -248,34 +255,34 @@ The `check-inbox.sh` hook now reads messages AND marks them as read. This is del
 uv sync  # or: pip install -e .
 
 # Initialize (first time, will prompt for password)
-team-mail init
+atcha init
 # Or with password directly:
-team-mail init --password mypassword
+atcha init --password mypassword
 
 # Set admin password for subsequent commands
-export TEAM_MAIL_ADMIN_PASS=mypassword
+export ATCHA_ADMIN_PASS=mypassword
 
-# Create an agent
-team-mail agents add --name maya-backend --role "Backend Engineer"
+# Create a user
+atcha admin users add --name maya-backend --role "Backend Engineer"
 
-# Get agent token
-AGENT_TOKEN=$(team-mail create-token --agent maya-backend)
-export TEAM_MAIL_TOKEN=$AGENT_TOKEN
+# Get user token
+USER_TOKEN=$(atcha create-token --user maya-backend)
+export ATCHA_TOKEN=$USER_TOKEN
 
 # Check your identity
-team-mail whoami
-team-mail agents get $(team-mail whoami)
+atcha whoami
+atcha contacts $(atcha whoami)
 
-# List agents
-team-mail agents list
+# List users
+atcha contacts
 
-# View a specific agent
-team-mail agents get alex-frontend
+# View a specific user
+atcha contacts alex-frontend
 
 # Send a message
-team-mail send alex-frontend "API is ready"
+atcha send --to alex-frontend "API is ready"
 
 # Check inbox
-team-mail inbox
-team-mail inbox read
+atcha messages check
+atcha messages read
 ```

@@ -1,5 +1,5 @@
 {
-  "name": "team-mail",
+  "name": "atcha",
   "version": "0.1.0",
   "description": "File-based inter-agent messaging for parallel Claude Code sessions",
   "author": {

@@ -4,9 +4,9 @@ Update the LLM-friendly CLI reference at `cli/cli-llm-help.txt`.
 
 ## Instructions
 
-1. Read the current CLI code at `cli/team_mail.py` to understand all commands
+1. Read the current CLI code at `src/atcha/cli/atcha.py` to understand all commands
 2. Generate a concise, LLM-optimized reference that covers:
-   - All user-facing commands (skip admin commands except `users add`)
+   - All user-facing commands (skip admin commands except `agents add`)
    - Common options for each command
    - Brief inline comments explaining what each does
 3. Write the result to `cli/cli-llm-help.txt`
@@ -22,8 +22,9 @@ Update the LLM-friendly CLI reference at `cli/cli-llm-help.txt`.
 ## Example Format
 
 ```
-team-mail users list [--names-only] [--tags=TAG]   # List users
-team-mail users get <name>                         # View user's profile
+atcha contacts [--names-only] [--tags=TAG] [--include-self]   # List contacts (excludes self by default)
+atcha contacts <name>                                          # View contact's profile
+atcha admin users add --name <name> --role <role>              # Add new user (admin only)
 ```
 
 ## Output

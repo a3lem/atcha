@@ -8,7 +8,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-OUTPUT_FILE="/tmp/team-mail-cli-reference.md"
+OUTPUT_FILE="/tmp/atcha-cli-reference.md"
 
 echo "Extracting CLI help..."
 echo ""
@@ -21,7 +21,7 @@ echo ""
     echo "## Main Help"
     echo ""
     echo '```'
-    team-mail --help 2>/dev/null || uv run team-mail --help
+    atcha --help 2>/dev/null || uv run atcha --help
     echo '```'
     echo ""
 
@@ -29,10 +29,10 @@ echo ""
     echo ""
 
     for cmd in "agents" "agents list" "agents get" "send" "inbox" "inbox read" "profile" "profile update" "whoami"; do
-        echo "### team-mail $cmd"
+        echo "### atcha $cmd"
         echo ""
         echo '```'
-        team-mail $cmd --help 2>/dev/null || uv run team-mail $cmd --help 2>/dev/null || echo "(help unavailable)"
+        atcha $cmd --help 2>/dev/null || uv run atcha $cmd --help 2>/dev/null || echo "(help unavailable)"
         echo '```'
         echo ""
     done
@@ -40,7 +40,7 @@ echo ""
 
 echo "CLI reference extracted to: $OUTPUT_FILE"
 echo ""
-echo "Compare with: $PROJECT_ROOT/extras/claude-plugin/skills/team-mail/SKILL.md"
+echo "Compare with: $PROJECT_ROOT/extras/claude-plugin/skills/atcha/SKILL.md"
 echo ""
 echo "To view the reference:"
 echo "  cat $OUTPUT_FILE"
