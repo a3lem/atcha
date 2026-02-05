@@ -261,7 +261,7 @@ class TestAgentsAdd:
         user_dir = atcha_dir / "users" / "maya"
         assert user_dir.is_dir()
         assert (user_dir / "profile.json").exists()
-        assert (user_dir / "mail" / "inbox.jsonl").exists()
+        assert (user_dir / "messages" / "inbox.jsonl").exists()
 
     def test_requires_admin_token(self, atcha_dir: Path) -> None:
         cwd = atcha_dir.parent
@@ -812,7 +812,7 @@ class TestMessagesRead:
         _ = run_cli("send", "--to", "recipient", "Second message", env=sender_env, cwd=str(cwd))
 
         # Get message IDs from inbox
-        inbox = atcha_dir / "users" / "recipient" / "mail" / "inbox.jsonl"
+        inbox = atcha_dir / "users" / "recipient" / "messages" / "inbox.jsonl"
         lines = inbox.read_text().strip().split("\n")
         msg1: dict[str, T.Any] = json.loads(lines[0])
 
@@ -962,7 +962,7 @@ class TestMessagesList:
         recipient_token = _create_user(atcha_dir, "recipient")
 
         # Manually write old-format message with 'body' field
-        inbox = atcha_dir / "users" / "recipient" / "mail" / "inbox.jsonl"
+        inbox = atcha_dir / "users" / "recipient" / "messages" / "inbox.jsonl"
         old_msg = {"id": "msg-old123", "thread_id": "msg-old123", "from": "sender", "to": ["recipient"], "ts": "2026-01-01T00:00:00Z", "type": "message", "body": "Old format message"}
         inbox.write_text(json.dumps(old_msg) + "\n")
 
@@ -996,13 +996,13 @@ class TestSend:
         assert response["to"] == ["recipient"]
 
         # Verify message in recipient inbox
-        inbox = atcha_dir / "users" / "recipient" / "mail" / "inbox.jsonl"
+        inbox = atcha_dir / "users" / "recipient" / "messages" / "inbox.jsonl"
         msg: dict[str, T.Any] = json.loads(inbox.read_text().strip())
         assert msg["from"] == "sender"
         assert msg["content"] == "Test message"
 
         # Verify message in sender sent
-        sent = atcha_dir / "users" / "sender" / "mail" / "sent.jsonl"
+        sent = atcha_dir / "users" / "sender" / "messages" / "sent.jsonl"
         msg = json.loads(sent.read_text().strip())
         assert msg["to"] == ["recipient"]
 
@@ -1025,7 +1025,7 @@ class TestSend:
         result = run_cli("send", "--to", "recipient", body, env=sender_env, cwd=str(cwd))
         assert result.returncode == 0
 
-        inbox = atcha_dir / "users" / "recipient" / "mail" / "inbox.jsonl"
+        inbox = atcha_dir / "users" / "recipient" / "messages" / "inbox.jsonl"
         msg: dict[str, T.Any] = json.loads(inbox.read_text().strip())
         assert msg["content"] == body
 
@@ -1047,13 +1047,13 @@ class TestSend:
         assert result.returncode == 0
 
         # Verify message in bob's inbox shows alice as sender
-        inbox = atcha_dir / "users" / "bob" / "mail" / "inbox.jsonl"
+        inbox = atcha_dir / "users" / "bob" / "messages" / "inbox.jsonl"
         msg: dict[str, T.Any] = json.loads(inbox.read_text().strip())
         assert msg["from"] == "alice"
         assert msg["content"] == "Hello from alice (sent by admin)"
 
         # Verify message in alice's sent log
-        sent = atcha_dir / "users" / "alice" / "mail" / "sent.jsonl"
+        sent = atcha_dir / "users" / "alice" / "messages" / "sent.jsonl"
         msg = json.loads(sent.read_text().strip())
         assert msg["to"] == ["bob"]
 
@@ -1074,12 +1074,12 @@ class TestSend:
         assert response["count"] == 2
 
         # Verify both recipients got the message
-        alice_inbox = atcha_dir / "users" / "alice" / "mail" / "inbox.jsonl"
+        alice_inbox = atcha_dir / "users" / "alice" / "messages" / "inbox.jsonl"
         alice_msg: dict[str, T.Any] = json.loads(alice_inbox.read_text().strip())
         assert alice_msg["content"] == "Team update"
         assert set(alice_msg["to"]) == {"alice", "bob"}
 
-        bob_inbox = atcha_dir / "users" / "bob" / "mail" / "inbox.jsonl"
+        bob_inbox = atcha_dir / "users" / "bob" / "messages" / "inbox.jsonl"
         bob_msg: dict[str, T.Any] = json.loads(bob_inbox.read_text().strip())
         assert bob_msg["content"] == "Team update"
         assert set(bob_msg["to"]) == {"alice", "bob"}
@@ -1112,7 +1112,7 @@ class TestSend:
         assert result.returncode == 0
 
         # Get the message ID from Bob's inbox
-        bob_inbox = atcha_dir / "users" / "bob" / "mail" / "inbox.jsonl"
+        bob_inbox = atcha_dir / "users" / "bob" / "messages" / "inbox.jsonl"
         original_msg: dict[str, T.Any] = json.loads(bob_inbox.read_text().strip())
         msg_id = original_msg["id"]
         thread_id = original_msg["thread_id"]
@@ -1123,7 +1123,7 @@ class TestSend:
         assert result.returncode == 0
 
         # Verify reply has correct threading
-        alice_inbox = atcha_dir / "users" / "alice" / "mail" / "inbox.jsonl"
+        alice_inbox = atcha_dir / "users" / "alice" / "messages" / "inbox.jsonl"
         reply_msg: dict[str, T.Any] = json.loads(alice_inbox.read_text().strip())
         assert reply_msg["thread_id"] == thread_id
         assert reply_msg["reply_to"] == msg_id
@@ -1142,7 +1142,7 @@ class TestSend:
         assert result.returncode == 0
 
         # Get message ID
-        bob_inbox = atcha_dir / "users" / "bob" / "mail" / "inbox.jsonl"
+        bob_inbox = atcha_dir / "users" / "bob" / "messages" / "inbox.jsonl"
         original_msg: dict[str, T.Any] = json.loads(bob_inbox.read_text().strip())
         msg_id = original_msg["id"]
 
@@ -1152,13 +1152,13 @@ class TestSend:
         assert result.returncode == 0
 
         # Verify only Alice got the reply
-        alice_inbox = atcha_dir / "users" / "alice" / "mail" / "inbox.jsonl"
+        alice_inbox = atcha_dir / "users" / "alice" / "messages" / "inbox.jsonl"
         reply_msg: dict[str, T.Any] = json.loads(alice_inbox.read_text().strip())
         assert reply_msg["to"] == ["alice"]
         assert reply_msg["reply_to"] == msg_id
 
         # Bob should not have the reply
-        bob_lines = (atcha_dir / "users" / "bob" / "mail" / "inbox.jsonl").read_text().strip().split("\n")
+        bob_lines = (atcha_dir / "users" / "bob" / "messages" / "inbox.jsonl").read_text().strip().split("\n")
         assert len(bob_lines) == 1  # Only the original message
 
     def test_error_all_with_reply_to(self, atcha_dir: Path) -> None:
@@ -1172,7 +1172,7 @@ class TestSend:
         _ = run_cli("send", "--to", "recipient", "Test", env=sender_env, cwd=str(cwd))
 
         # Get message ID
-        recipient_inbox = atcha_dir / "users" / "recipient" / "mail" / "inbox.jsonl"
+        recipient_inbox = atcha_dir / "users" / "recipient" / "messages" / "inbox.jsonl"
         msg: dict[str, T.Any] = json.loads(recipient_inbox.read_text().strip())
         msg_id = msg["id"]
 
@@ -1204,7 +1204,7 @@ class TestSend:
         assert result.returncode == 0
 
         # Get message ID
-        bob_inbox = atcha_dir / "users" / "bob" / "mail" / "inbox.jsonl"
+        bob_inbox = atcha_dir / "users" / "bob" / "messages" / "inbox.jsonl"
         msg: dict[str, T.Any] = json.loads(bob_inbox.read_text().strip())
         msg_id = msg["id"]
 

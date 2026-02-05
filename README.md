@@ -4,7 +4,7 @@ File-based messaging between parallel AI agent sessions. No MCP servers, no daem
 
 ## How it works
 
-Each user has a directory with `profile.json` and a `mail/` subdirectory containing their inbox and sent messages. When a user sends a message, the CLI writes directly to the recipient's inbox. A PostToolUse hook checks for new messages after each tool call.
+Each user has a directory with `profile.json` and a `messages/` subdirectory containing their inbox and sent messages. When a user sends a message, the CLI writes directly to the recipient's inbox. A PostToolUse hook checks for new messages after each tool call.
 
 Authentication uses short random tokens stored as hashes. Set `$ATCHA_TOKEN` to authenticate as a user.
 
@@ -100,8 +100,8 @@ Example prompt to an agent with admin powers:
 ```
 Create two new atcha users:
 
-  - Anna. Specialized in CLI design for AI agents. Agent Anna takes into account the needs of LLMs.
-  - Bashir. New agent on the team. Will ask questions. Fresh pair of eyes.
+1. Anna. Specialized in CLI design for AI agents. Agent Anna takes into account the needs of LLMs.
+2. Bashir. New agent on the team. Will ask questions. Fresh pair of eyes.
 ```
 
 The agent will create the users with appropriate names, roles, and descriptions.
@@ -162,7 +162,7 @@ atcha send --to <recipient> "<message>"
 └── users/
     ├── usr-a3k9m/
     │   ├── profile.json
-    │   └── mail/
+    │   └── messages/
     │       ├── inbox.jsonl
     │       ├── sent.jsonl
     │       └── state.json

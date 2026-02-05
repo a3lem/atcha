@@ -61,8 +61,8 @@ class UserProfile(T.TypedDict):
     updated: str
 
 
-class MailState(T.TypedDict, total=False):
-    """Mail state stored in state.json."""
+class MessagesState(T.TypedDict, total=False):
+    """Message state stored in state.json."""
 
     last_read: str
 
@@ -263,13 +263,13 @@ def _ensure_user_dir(atcha_dir: Path, user_id: str) -> Path:
     """Create user directory structure."""
     user_dir = _get_user_dir(atcha_dir, user_id)
     user_dir.mkdir(parents=True, exist_ok=True)
-    mail_dir = user_dir / "mail"
-    mail_dir.mkdir(exist_ok=True)
+    messages_dir = user_dir / "messages"
+    messages_dir.mkdir(exist_ok=True)
     for name in ("inbox.jsonl", "sent.jsonl"):
-        f = mail_dir / name
+        f = messages_dir / name
         if not f.exists():
             f.touch()
-    state = mail_dir / "state.json"
+    state = messages_dir / "state.json"
     if not state.exists():
         _ = state.write_text("{}\n")
     return user_dir
@@ -1187,7 +1187,7 @@ def cmd_agents_update(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Mail commands (Tasks 4.1-4.3)
+# Message commands (Tasks 4.1-4.3)
 # ---------------------------------------------------------------------------
 
 
@@ -1240,17 +1240,17 @@ def cmd_messages_check(args: argparse.Namespace) -> None:
     atcha_dir, user_name = _require_user()
 
     user_dir = _get_user_dir(atcha_dir, user_name)
-    inbox = user_dir / "mail" / "inbox.jsonl"
+    inbox = user_dir / "messages" / "inbox.jsonl"
 
     if not inbox.exists() or inbox.stat().st_size == 0:
         print("No messages")
         return
 
     # Get last_read for unread filtering
-    state_file = user_dir / "mail" / "state.json"
+    state_file = user_dir / "messages" / "state.json"
     last_read: str | None = None
     if state_file.exists():
-        state = T.cast(MailState, json.loads(state_file.read_text()))
+        state = T.cast(MessagesState, json.loads(state_file.read_text()))
         last_read = state.get("last_read")
 
     # Collect and count messages
@@ -1327,7 +1327,7 @@ def cmd_messages_read(args: argparse.Namespace) -> None:
     # Determine if we should include 'to' field (only for admin impersonating)
     include_to_field = is_admin and _cli_user is not None
 
-    inbox = user_dir / "mail" / "inbox.jsonl"
+    inbox = user_dir / "messages" / "inbox.jsonl"
 
     if not inbox.exists() or inbox.stat().st_size == 0:
         return  # Silent exit
@@ -1341,10 +1341,10 @@ def cmd_messages_read(args: argparse.Namespace) -> None:
     target_ids_set = set(target_ids) if target_ids else None
 
     # Get last_read for unread filtering
-    state_file = user_dir / "mail" / "state.json"
+    state_file = user_dir / "messages" / "state.json"
     last_read: str | None = None
     if not include_read and state_file.exists():
-        state = T.cast(MailState, json.loads(state_file.read_text()))
+        state = T.cast(MessagesState, json.loads(state_file.read_text()))
         last_read = state.get("last_read")
 
     latest_ts: str | None = None
@@ -1388,9 +1388,9 @@ def cmd_messages_read(args: argparse.Namespace) -> None:
 
     # Mark as read (unless --no-mark)
     if latest_ts is not None and not no_mark:
-        state: MailState = {}
+        state: MessagesState = {}
         if state_file.exists():
-            state = T.cast(MailState, json.loads(state_file.read_text()))
+            state = T.cast(MessagesState, json.loads(state_file.read_text()))
         state["last_read"] = latest_ts
         _ = state_file.write_text(json.dumps(state) + "\n")
 
@@ -1436,7 +1436,7 @@ def cmd_messages_list(args: argparse.Namespace) -> None:
     # Determine if we should include 'to' field (only for admin impersonating)
     include_to_field = is_admin and _cli_user is not None
 
-    inbox = user_dir / "mail" / "inbox.jsonl"
+    inbox = user_dir / "messages" / "inbox.jsonl"
 
     if not inbox.exists() or inbox.stat().st_size == 0:
         print("[]")
@@ -1450,10 +1450,10 @@ def cmd_messages_list(args: argparse.Namespace) -> None:
     no_preview = T.cast(bool, getattr(args, "no_preview", False))
 
     # Get last_read for unread filtering
-    state_file = user_dir / "mail" / "state.json"
+    state_file = user_dir / "messages" / "state.json"
     last_read: str | None = None
     if not include_all and state_file.exists():
-        state = T.cast(MailState, json.loads(state_file.read_text()))
+        state = T.cast(MessagesState, json.loads(state_file.read_text()))
         last_read = state.get("last_read")
 
     messages: list[dict[str, T.Any]] = []
@@ -1516,7 +1516,7 @@ def _find_message_by_id(atcha_dir: Path, user: str, msg_id: str) -> Message | No
     user_dir = _get_user_dir(atcha_dir, user)
 
     # Check inbox
-    inbox_file = user_dir / "mail" / "inbox.jsonl"
+    inbox_file = user_dir / "messages" / "inbox.jsonl"
     if inbox_file.exists():
         for line in inbox_file.read_text().splitlines():
             if not line.strip():
@@ -1529,7 +1529,7 @@ def _find_message_by_id(atcha_dir: Path, user: str, msg_id: str) -> Message | No
                 continue
 
     # Check sent
-    sent_file = user_dir / "mail" / "sent.jsonl"
+    sent_file = user_dir / "messages" / "sent.jsonl"
     if sent_file.exists():
         for line in sent_file.read_text().splitlines():
             if not line.strip():
@@ -1558,7 +1558,7 @@ def _get_thread_participants(atcha_dir: Path, thread_id: str) -> list[str]:
             continue
 
         # Check inbox
-        inbox_file = user_dir / "mail" / "inbox.jsonl"
+        inbox_file = user_dir / "messages" / "inbox.jsonl"
         if inbox_file.exists():
             for line in inbox_file.read_text().splitlines():
                 if not line.strip():
@@ -1580,7 +1580,7 @@ def _get_thread_participants(atcha_dir: Path, thread_id: str) -> list[str]:
                     continue
 
         # Check sent
-        sent_file = user_dir / "mail" / "sent.jsonl"
+        sent_file = user_dir / "messages" / "sent.jsonl"
         if sent_file.exists():
             for line in sent_file.read_text().splitlines():
                 if not line.strip():
@@ -1721,7 +1721,7 @@ def cmd_send(args: argparse.Namespace) -> None:
     # Write to each recipient's inbox
     for recipient in recipients:
         recipient_dir = _get_user_dir(atcha_dir, recipient)
-        recipient_inbox = recipient_dir / "mail" / "inbox.jsonl"
+        recipient_inbox = recipient_dir / "messages" / "inbox.jsonl"
         try:
             with open(recipient_inbox, "a") as f:
                 _ = f.write(line)
@@ -1729,7 +1729,7 @@ def cmd_send(args: argparse.Namespace) -> None:
             _error(f"Failed to write to {recipient}'s inbox: {e}")
 
     # Write to sender sent log
-    sender_sent = sender_dir / "mail" / "sent.jsonl"
+    sender_sent = sender_dir / "messages" / "sent.jsonl"
     try:
         with open(sender_sent, "a") as f:
             _ = f.write(line)

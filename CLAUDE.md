@@ -10,7 +10,7 @@ The Python CLI (`atcha`) provides a hierarchical command structure with token-ba
 
 A `.atcha/` directory lives at the project root and contains admin config, tokens, and agent data. Agents authenticate via tokens stored in `$ATCHA_TOKEN`.
 
-Each user gets a directory under `.atcha/users/` with their profile and mail. Sending a message means appending a JSON line directly to the recipient's `inbox.jsonl`. A PostToolUse hook checks for new messages after every tool call.
+Each user gets a directory under `.atcha/users/` with their profile and messages. Sending a message means appending a JSON line directly to the recipient's `inbox.jsonl`. A PostToolUse hook checks for new messages after every tool call.
 
 ### Directory structure
 
@@ -23,7 +23,7 @@ Each user gets a directory under `.atcha/users/` with their profile and mail. Se
 └── users/
     └── <user-id>/          # directory named by user id (e.g., usr-a3k9m)
         ├── profile.json
-        └── mail/
+        └── messages/
             ├── inbox.jsonl
             ├── sent.jsonl
             └── state.json
@@ -79,10 +79,10 @@ Examples:
 ### Message flow
 
 1. Agent A (authenticated via token) sends a message to alex
-2. The CLI uses the token to identify the sender and appends to `alex/mail/inbox.jsonl` (using alex's user directory)
-3. A copy goes to sender's `mail/sent.jsonl` atomically
+2. The CLI uses the token to identify the sender and appends to `alex/messages/inbox.jsonl` (using alex's user directory)
+3. A copy goes to sender's `messages/sent.jsonl` atomically
 4. On agent B's next tool call, the `check-inbox.sh` hook fires, sees the new message, and prints it to stdout
-5. Agent B runs `/check-mail` (which uses `messages read`) to read and mark messages as read
+5. Agent B runs `/check-messages` (which uses `messages read`) to read and mark messages as read
 
 ### Env vars
 
@@ -145,7 +145,7 @@ Notes:
 - `--full` includes all fields (dates and empty values, hidden by default).
 - `profile update` without `--name` updates your own profile (requires token). With `--name`, requires admin auth.
 
-### Mail commands (require agent token)
+### Message commands (require agent token)
 
 | Command | Arguments | Output | Purpose |
 |---------|-----------|--------|---------|

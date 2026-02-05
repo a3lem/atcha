@@ -7,7 +7,7 @@
 OUTPUT=$(atcha messages read 2>/dev/null)
 
 if [ -n "$OUTPUT" ]; then
-  echo "=== New mail ==="
+  echo "=== New messages ==="
   echo "$OUTPUT" | python3 -c "
 import sys, json
 for line in sys.stdin:
