@@ -394,34 +394,34 @@ Add tests for federation functionality.
 
 ## Checklist
 
-- [ ] [NEXT] Add SpaceConfig type and _generate_space_id() _[FR-001.1]_
-- [ ] Add _slugify_handle() and space.json helpers _[FR-001.2]_
-- [ ] Modify cmd_init to create space.json _[FR-001.1, FR-001.2]_
-- [ ] Add _ensure_space_config() for auto-upgrade _[FR-006.1, FR-006.2]_
-- [ ] Add FederatedSpace and FederationConfig types _[FR-002.1]_
-- [ ] Add federation.local.json helpers _[FR-002.1]_
-- [ ] Add cmd_admin_federated_add with collision detection _[FR-002.1, FR-002.2, FR-002.3, FR-002.4]_
-- [ ] Add cmd_admin_federated_remove _[FR-002.5]_
-- [ ] Add cmd_admin_federated_list with availability _[FR-002.6]_
-- [ ] Add parser entries for admin federated _[FR-002.1]_
-- [ ] Add cmd_admin_space_rename _[FR-001.3]_
-- [ ] Add parser entries for admin space _[FR-001.3]_
-- [ ] Add _parse_address() for name@space syntax _[FR-004.1]_
-- [ ] Add _resolve_space() helper _[FR-003.4, FR-004.1]_
-- [ ] Add _resolve_user_cross_space() with ambiguity detection _[FR-004.3, FR-004.4]_
-- [ ] Extend cmd_agents_list for federated users _[FR-003.1]_
-- [ ] Add --space filter to contacts _[FR-003.2]_
-- [ ] Handle multiple users with same name _[FR-003.3]_
-- [ ] Add unavailable space warning _[FR-003.5]_
-- [ ] Add from_space to sent messages _[FR-005.1]_
-- [ ] Display cross-space sender as name@handle _[FR-005.2]_
-- [ ] Handle unknown from_space in display _[FR-005.3, FR-005.4]_
-- [ ] Extend cmd_send for cross-space recipients _[FR-004.1, FR-004.2]_
-- [ ] Handle ambiguous recipient error _[FR-004.4]_
-- [ ] Handle unavailable space error _[FR-004.5]_
-- [ ] Handle messages without from_space _[FR-006.3]_
-- [ ] Add tests for all acceptance criteria _[FR-*, NFR-*]_
-- [ ] Verify all acceptance criteria _[FR-*, NFR-*]_
+- [x] Add SpaceConfig type and _generate_space_id() _[FR-001.1]_
+- [x] Add _slugify_handle() and space.json helpers _[FR-001.2]_
+- [x] Modify cmd_init to create space.json _[FR-001.1, FR-001.2]_
+- [x] Add _ensure_space_config() for auto-upgrade _[FR-006.1, FR-006.2]_
+- [x] Add FederatedSpace and FederationConfig types _[FR-002.1]_
+- [x] Add federation.local.json helpers _[FR-002.1]_
+- [x] Add cmd_admin_federated_add with collision detection _[FR-002.1, FR-002.2, FR-002.3, FR-002.4]_
+- [x] Add cmd_admin_federated_remove _[FR-002.5]_
+- [x] Add cmd_admin_federated_list with availability _[FR-002.6]_
+- [x] Add parser entries for admin federated _[FR-002.1]_
+- [x] Add cmd_admin_space_rename _[FR-001.3]_
+- [x] Add parser entries for admin space _[FR-001.3]_
+- [x] Add _parse_address() for name@space syntax _[FR-004.1]_
+- [x] Add _resolve_space() helper _[FR-003.4, FR-004.1]_
+- [x] Add _resolve_user_cross_space() with ambiguity detection _[FR-004.3, FR-004.4]_
+- [x] Extend cmd_agents_list for federated users _[FR-003.1]_
+- [x] Add --space filter to contacts _[FR-003.2]_
+- [x] Handle multiple users with same name _[FR-003.3]_
+- [x] Add unavailable space warning _[FR-003.5]_
+- [x] Add from_space to sent messages _[FR-005.1]_
+- [x] Display cross-space sender as name@handle _[FR-005.2]_
+- [x] Handle unknown from_space in display _[FR-005.3, FR-005.4]_
+- [x] Extend cmd_send for cross-space recipients _[FR-004.1, FR-004.2]_
+- [x] Handle ambiguous recipient error _[FR-004.4]_
+- [x] Handle unavailable space error _[FR-004.5]_
+- [x] Handle messages without from_space _[FR-006.3]_
+- [x] Add tests for all acceptance criteria _[FR-*, NFR-*]_
+- [x] Verify all acceptance criteria _[FR-*, NFR-*]_
 
 ## Notes
 

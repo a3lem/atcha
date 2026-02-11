@@ -35,7 +35,7 @@ def run_cli(
 def atcha_dir(tmp_path: Path) -> Path:
     """Create and initialize a .atcha directory."""
     # Initialize the directory
-    result = run_cli("init", f"--password={PASSWORD}", cwd=str(tmp_path))
+    result = run_cli("admin", "init", f"--password={PASSWORD}", cwd=str(tmp_path))
     assert result.returncode == 0, result.stderr
     return tmp_path / ".atcha"
 
@@ -51,21 +51,40 @@ def _create_user(
     role: str = "Test Agent",
 ) -> str:
     """Create a user and return their token."""
+    token, _ = _create_user_full(atcha_dir, name, role)
+    return token
+
+
+def _create_user_full(
+    atcha_dir: Path,
+    name: str,
+    role: str = "Test Agent",
+) -> tuple[str, str]:
+    """Create a user and return (token, user_id)."""
     cwd = atcha_dir.parent
     env = _admin_env(atcha_dir)
 
     # Create user (returns profile with generated id)
-    result = run_cli("admin", "users", "add", f"--name={name}", f"--role={role}", env=env, cwd=str(cwd))
+    result = run_cli("admin", "users", "create", f"--name={name}", f"--role={role}", env=env, cwd=str(cwd))
     assert result.returncode == 0, result.stderr
 
-    # Extract the user name from the profile (directory name for token lookup)
+    # Extract user name and id from profile
     profile = json.loads(result.stdout)
-    user_name = profile["name"]  # This is the directory name / token name
+    user_name = profile["name"]
+    user_id: str = profile["id"]
 
-    # Get user token using the name (which is the token file name)
-    result = run_cli("create-token", "--user", user_name, env=env, cwd=str(cwd))
+    # Get user token using the name
+    result = run_cli("admin", "create-token", "--user", user_name, env=env, cwd=str(cwd))
     assert result.returncode == 0, result.stderr
-    return result.stdout.strip()
+    return result.stdout.strip(), user_id
+
+
+def _user_id(atcha_dir: Path, name: str) -> str:
+    """Look up a user's ID from their profile.json."""
+    profile_path = atcha_dir / "users" / name / "profile.json"
+    profile = json.loads(profile_path.read_text())
+    uid: str = profile["id"]
+    return uid
 
 
 # ---------- init ----------
@@ -73,7 +92,7 @@ def _create_user(
 
 class TestInit:
     def test_creates_structure(self, tmp_path: Path) -> None:
-        result = run_cli("init", f"--password={PASSWORD}", cwd=str(tmp_path))
+        result = run_cli("admin", "init", f"--password={PASSWORD}", cwd=str(tmp_path))
         assert result.returncode == 0
         assert "Initialized" in result.stdout
 
@@ -85,26 +104,37 @@ class TestInit:
 
     def test_fails_if_already_initialized(self, atcha_dir: Path) -> None:
         cwd = atcha_dir.parent
-        result = run_cli("init", f"--password={PASSWORD}", cwd=str(cwd))
+        result = run_cli("admin", "init", f"--password={PASSWORD}", cwd=str(cwd))
         assert result.returncode != 0
         assert "Already initialized" in result.stderr
 
     def test_prompts_for_password(self, tmp_path: Path) -> None:
         # Without --password, it should attempt interactive prompt
         # In non-interactive mode (CI), this will fail with EOF
-        result = run_cli("init", cwd=str(tmp_path))
+        result = run_cli("admin", "init", cwd=str(tmp_path))
         # Should either prompt or fail gracefully
         # Since tests run non-interactively, expect failure
         assert result.returncode != 0
 
-    def test_check_returns_0_when_initialized(self, atcha_dir: Path) -> None:
+    def test_status_returns_0_when_initialized(self, atcha_dir: Path) -> None:
         cwd = atcha_dir.parent
-        result = run_cli("init", "--check", cwd=str(cwd))
+        result = run_cli("admin", "status", cwd=str(cwd))
         assert result.returncode == 0
         assert "Atcha initialized" in result.stdout
 
-    def test_check_returns_1_when_not_initialized(self, tmp_path: Path) -> None:
-        result = run_cli("init", "--check", cwd=str(tmp_path))
+    def test_status_returns_1_when_not_initialized(self, tmp_path: Path) -> None:
+        result = run_cli("admin", "status", cwd=str(tmp_path))
+        assert result.returncode == 1
+        assert result.stdout == ""
+
+    def test_status_quiet_suppresses_output(self, atcha_dir: Path) -> None:
+        cwd = atcha_dir.parent
+        result = run_cli("admin", "status", "-q", cwd=str(cwd))
+        assert result.returncode == 0
+        assert result.stdout == ""
+
+    def test_status_quiet_returns_1_when_not_initialized(self, tmp_path: Path) -> None:
+        result = run_cli("admin", "status", "--quiet", cwd=str(tmp_path))
         assert result.returncode == 1
         assert result.stdout == ""
 
@@ -117,7 +147,7 @@ class TestAdminPassword:
         cwd = atcha_dir.parent
         result = run_cli(
             "admin", "password",
-            f"--old={PASSWORD}",
+            f"--password={PASSWORD}",
             "--new=newpass123",
             cwd=str(cwd),
         )
@@ -127,7 +157,7 @@ class TestAdminPassword:
         # Old password should fail
         old_env = {"ATCHA_DIR": str(atcha_dir), "ATCHA_ADMIN_PASS": PASSWORD}
         result = run_cli(
-            "admin", "users", "add", "--name=test-user", "--role=Test",
+            "admin", "users", "create", "--name=test-user", "--role=Test",
             env=old_env, cwd=str(cwd),
         )
         assert result.returncode != 0
@@ -135,7 +165,7 @@ class TestAdminPassword:
         # New password should work
         new_env = {"ATCHA_DIR": str(atcha_dir), "ATCHA_ADMIN_PASS": "newpass123"}
         result = run_cli(
-            "admin", "users", "add", "--name=test-user", "--role=Test",
+            "admin", "users", "create", "--name=test-user", "--role=Test",
             env=new_env, cwd=str(cwd),
         )
         assert result.returncode == 0
@@ -144,7 +174,7 @@ class TestAdminPassword:
         cwd = atcha_dir.parent
         result = run_cli(
             "admin", "password",
-            "--old=wrongpass",
+            "--password=wrongpass",
             "--new=newpass123",
             cwd=str(cwd),
         )
@@ -161,14 +191,14 @@ class TestCreateToken:
         env = _admin_env(atcha_dir)
 
         # Create user first
-        result = run_cli("admin", "users", "add", "--name=test-user", "--role=Test", env=env, cwd=str(cwd))
+        result = run_cli("admin", "users", "create", "--name=test-user", "--role=Test", env=env, cwd=str(cwd))
         assert result.returncode == 0
 
         # Create token using --password
-        result = run_cli("create-token", "--user", "test-user", f"--password={PASSWORD}", cwd=str(cwd))
+        result = run_cli("admin", "create-token", "--user", "test-user", f"--password={PASSWORD}", cwd=str(cwd))
         assert result.returncode == 0
         token = result.stdout.strip()
-        assert len(token) == 5
+        assert len(token) == 5  # 5-char token (not user ID)
 
     def test_creates_agent_token_via_env(self, atcha_dir: Path) -> None:
         """ATCHA_ADMIN_PASS env var works for create-token."""
@@ -176,18 +206,18 @@ class TestCreateToken:
         env = _admin_env(atcha_dir)
 
         # Create user first
-        result = run_cli("admin", "users", "add", "--name=test-user", "--role=Test", env=env, cwd=str(cwd))
+        result = run_cli("admin", "users", "create", "--name=test-user", "--role=Test", env=env, cwd=str(cwd))
         assert result.returncode == 0
 
         # Create token using env var (no --password)
-        result = run_cli("create-token", "--user", "test-user", env=env, cwd=str(cwd))
+        result = run_cli("admin", "create-token", "--user", "test-user", env=env, cwd=str(cwd))
         assert result.returncode == 0
         token = result.stdout.strip()
-        assert len(token) == 5
+        assert len(token) == 5  # 5-char token (not user ID)
 
     def test_rejects_nonexistent_user(self, atcha_dir: Path) -> None:
         cwd = atcha_dir.parent
-        result = run_cli("create-token", "--user", "nobody", f"--password={PASSWORD}", cwd=str(cwd))
+        result = run_cli("admin", "create-token", "--user", "nobody", f"--password={PASSWORD}", cwd=str(cwd))
         assert result.returncode != 0
         assert "not found" in result.stderr
 
@@ -197,15 +227,15 @@ class TestCreateToken:
         env = _admin_env(atcha_dir)
 
         # Create user
-        result = run_cli("admin", "users", "add", "--name=test-user", "--role=Test", env=env, cwd=str(cwd))
+        result = run_cli("admin", "users", "create", "--name=test-user", "--role=Test", env=env, cwd=str(cwd))
         assert result.returncode == 0
 
         # Create token twice - should get same result
-        result1 = run_cli("create-token", "--user", "test-user", f"--password={PASSWORD}", cwd=str(cwd))
+        result1 = run_cli("admin", "create-token", "--user", "test-user", f"--password={PASSWORD}", cwd=str(cwd))
         assert result1.returncode == 0
         token1 = result1.stdout.strip()
 
-        result2 = run_cli("create-token", "--user", "test-user", f"--password={PASSWORD}", cwd=str(cwd))
+        result2 = run_cli("admin", "create-token", "--user", "test-user", f"--password={PASSWORD}", cwd=str(cwd))
         assert result2.returncode == 0
         token2 = result2.stdout.strip()
 
@@ -217,10 +247,10 @@ class TestCreateToken:
         env = _admin_env(atcha_dir)
 
         # Create user and token
-        result = run_cli("admin", "users", "add", "--name=test-user", "--role=Test", env=env, cwd=str(cwd))
+        result = run_cli("admin", "users", "create", "--name=test-user", "--role=Test", env=env, cwd=str(cwd))
         assert result.returncode == 0
 
-        result = run_cli("create-token", "--user", "test-user", f"--password={PASSWORD}", cwd=str(cwd))
+        result = run_cli("admin", "create-token", "--user", "test-user", f"--password={PASSWORD}", cwd=str(cwd))
         assert result.returncode == 0
         token = result.stdout.strip()
 
@@ -243,7 +273,7 @@ class TestAgentsAdd:
         env = _admin_env(atcha_dir)
 
         result = run_cli(
-            "admin", "users", "add", "--name=maya", "--role=Backend Engineer",
+            "admin", "users", "create", "--name=maya", "--role=Backend Engineer",
             "--status=Working on auth",
             "--tags=backend,auth",
             env=env, cwd=str(cwd),
@@ -251,7 +281,7 @@ class TestAgentsAdd:
         assert result.returncode == 0
 
         profile: dict[str, T.Any] = json.loads(result.stdout)
-        assert len(profile["id"]) == 5  # Random 5-char id
+        assert profile["id"].startswith("usr-")  # Random usr-XXXXX id
         assert profile["name"] == "maya"
         assert profile["role"] == "Backend Engineer"
         assert profile["status"] == "Working on auth"
@@ -266,7 +296,7 @@ class TestAgentsAdd:
     def test_requires_admin_token(self, atcha_dir: Path) -> None:
         cwd = atcha_dir.parent
         # No token
-        result = run_cli("admin", "users", "add", "--name=test-user", "--role=Test", cwd=str(cwd))
+        result = run_cli("admin", "users", "create", "--name=test-user", "--role=Test", cwd=str(cwd))
         assert result.returncode != 0
         assert "ATCHA_TOKEN" in result.stderr
 
@@ -275,13 +305,13 @@ class TestAgentsAdd:
         admin_env = _admin_env(atcha_dir)
 
         # Create user and get their token
-        _ = run_cli("admin", "users", "add", "--name=testuser", "--role=Test", env=admin_env, cwd=str(cwd))
-        result = run_cli("create-token", "--user", "testuser", env=admin_env, cwd=str(cwd))
+        _ = run_cli("admin", "users", "create", "--name=testuser", "--role=Test", env=admin_env, cwd=str(cwd))
+        result = run_cli("admin", "create-token", "--user", "testuser", env=admin_env, cwd=str(cwd))
         user_token = result.stdout.strip()
 
         # Try to create with user token (no admin password in env)
         user_env = {"ATCHA_TOKEN": user_token, "ATCHA_DIR": str(atcha_dir)}
-        result = run_cli("admin", "users", "add", "--name=another", "--role=Test", env=user_env, cwd=str(cwd))
+        result = run_cli("admin", "users", "create", "--name=another", "--role=Test", env=user_env, cwd=str(cwd))
         assert result.returncode != 0
         assert ("Admin" in result.stderr or "token required" in result.stderr)  # Error about auth
 
@@ -290,12 +320,12 @@ class TestAgentsAdd:
         env = _admin_env(atcha_dir)
 
         # Too short
-        result = run_cli("admin", "users", "add", "--name=ab", "--role=Test", env=env, cwd=str(cwd))
+        result = run_cli("admin", "users", "create", "--name=ab", "--role=Test", env=env, cwd=str(cwd))
         assert result.returncode != 0
         assert "at least 3" in result.stderr
 
         # Invalid chars
-        result = run_cli("admin", "users", "add", "--name=User-Name", "--role=Test", env=env, cwd=str(cwd))
+        result = run_cli("admin", "users", "create", "--name=User-Name", "--role=Test", env=env, cwd=str(cwd))
         assert result.returncode != 0
         assert "lowercase" in result.stderr
 
@@ -304,8 +334,8 @@ class TestAgentsAdd:
         cwd = atcha_dir.parent
         env = _admin_env(atcha_dir)
 
-        _ = run_cli("admin", "users", "add", "--name=testuser", "--role=Test", env=env, cwd=str(cwd))
-        result = run_cli("admin", "users", "add", "--name=testuser", "--role=Test", env=env, cwd=str(cwd))
+        _ = run_cli("admin", "users", "create", "--name=testuser", "--role=Test", env=env, cwd=str(cwd))
+        result = run_cli("admin", "users", "create", "--name=testuser", "--role=Test", env=env, cwd=str(cwd))
         assert result.returncode != 0
         # Could fail because name already taken or id already exists
         assert "already" in result.stderr
@@ -315,9 +345,9 @@ class TestAgentsAdd:
         cwd = atcha_dir.parent
         env = _admin_env(atcha_dir)
 
-        _ = run_cli("admin", "users", "add", "--name=alice", "--role=Backend", env=env, cwd=str(cwd))
+        _ = run_cli("admin", "users", "create", "--name=alice", "--role=Backend", env=env, cwd=str(cwd))
         # Different role but same name 'alice'
-        result = run_cli("admin", "users", "add", "--name=alice", "--role=Frontend", env=env, cwd=str(cwd))
+        result = run_cli("admin", "users", "create", "--name=alice", "--role=Frontend", env=env, cwd=str(cwd))
         assert result.returncode != 0
         assert "already exists" in result.stderr
 
@@ -328,51 +358,83 @@ class TestAgentsAdd:
 
         # No token, password from env
         result = run_cli(
-            "admin", "users", "add", "--name=pwtest", "--role=Password User",
+            "admin", "users", "create", "--name=pwtest", "--role=Password User",
             env=env, cwd=str(cwd),
         )
         assert result.returncode == 0
         profile: dict[str, T.Any] = json.loads(result.stdout)
-        assert len(profile["id"]) == 5  # Random 5-char id
+        assert profile["id"].startswith("usr-")  # Random usr-XXXXX id
         assert profile["name"] == "pwtest"
+
+    def test_bare_admin_users_lists_all(self, atcha_dir: Path) -> None:
+        """admin users (bare) lists all users as JSON."""
+        cwd = atcha_dir.parent
+        admin_env = _admin_env(atcha_dir)
+
+        # Create a user first
+        _ = run_cli("admin", "users", "create", "--name=list-test", "--role=Test", env=admin_env, cwd=str(cwd))
+
+        result = run_cli("admin", "users", env=admin_env, cwd=str(cwd))
+        assert result.returncode == 0
+        users = json.loads(result.stdout)
+        assert isinstance(users, list)
+        assert len(users) >= 1
+        names = [u["name"] for u in users]
+        assert "list-test" in names
+
+    def test_password_cli_flag(self, atcha_dir: Path) -> None:
+        """admin users add: --password CLI flag works (no env var needed)."""
+        cwd = atcha_dir.parent
+        env = {"ATCHA_DIR": str(atcha_dir)}  # Only ATCHA_DIR, no password env
+
+        # Use --password flag after the subcommand (user-friendly position)
+        result = run_cli(
+            "admin", "users", "create",
+            "--name=clitest", "--role=CLI Test User", f"--password={PASSWORD}",
+            env=env, cwd=str(cwd),
+        )
+        assert result.returncode == 0, f"Expected success, got: {result.stderr}"
+        profile: dict[str, T.Any] = json.loads(result.stdout)
+        assert profile["name"] == "clitest"
+        assert profile["role"] == "CLI Test User"
 
 
 # ---------- agents ----------
 
 
 class TestAgents:
+    def test_works_without_auth(self, atcha_dir: Path) -> None:
+        """contacts list works without authentication (read-only)."""
+        cwd = atcha_dir.parent
+        admin_env = _admin_env(atcha_dir)
+        _ = run_cli("admin", "users", "create", "--name=visible", "--role=Test", env=admin_env, cwd=str(cwd))
+
+        # No token, just ATCHA_DIR - contacts list should still work
+        env = {"ATCHA_DIR": str(atcha_dir)}
+        result = run_cli("contacts", env=env, cwd=str(cwd))
+        assert result.returncode == 0
+        contacts = json.loads(result.stdout)
+        assert len(contacts) == 1
+        assert contacts[0]["name"] == "visible"
+
     def test_lists_agents(self, atcha_dir: Path) -> None:
         """agents list: returns JSON array of profiles (without dates by default)."""
         cwd = atcha_dir.parent
-        env = {"ATCHA_DIR": str(atcha_dir)}
+        admin_env = _admin_env(atcha_dir)
 
         # Create some users (using unique short names)
-        admin_env = _admin_env(atcha_dir)
-        _ = run_cli("admin", "users", "add", "--name=alice", "--role=Title A", env=admin_env, cwd=str(cwd))
-        _ = run_cli("admin", "users", "add", "--name=bob", "--role=Title B", env=admin_env, cwd=str(cwd))
+        _ = run_cli("admin", "users", "create", "--name=alice", "--role=Title A", env=admin_env, cwd=str(cwd))
+        _ = run_cli("admin", "users", "create", "--name=bob", "--role=Title B", env=admin_env, cwd=str(cwd))
 
-        result = run_cli("contacts", "--include-self", env=env, cwd=str(cwd))
+        result = run_cli("contacts", "--include-self", env=admin_env, cwd=str(cwd))
         assert result.returncode == 0
         profiles = json.loads(result.stdout)
         assert len(profiles) == 2
-        assert len(profiles[0]["id"]) == 5  # Random 5-char id
+        assert profiles[0]["id"].startswith("usr-")  # Random usr-XXXXX id
         assert profiles[0]["name"] == "alice"
         assert profiles[0]["role"] == "Title A"
         assert "joined" not in profiles[0]  # No dates by default
         assert profiles[1]["name"] == "bob"
-
-    def test_names_only(self, atcha_dir: Path) -> None:
-        """agents list --names-only outputs agent ids."""
-        cwd = atcha_dir.parent
-        env = {"ATCHA_DIR": str(atcha_dir)}
-        admin_env = _admin_env(atcha_dir)
-        _ = run_cli("admin", "users", "add", "--name=alice-dev", "--role=A", env=admin_env, cwd=str(cwd))
-        _ = run_cli("admin", "users", "add", "--name=bob-dev", "--role=B", env=admin_env, cwd=str(cwd))
-
-        result = run_cli("contacts", "--include-self", "--names-only", env=env, cwd=str(cwd))
-        assert result.returncode == 0
-        lines = result.stdout.strip().split("\n")
-        assert lines == ["alice-dev", "bob-dev"]
 
     def test_exclude_self_by_default(self, atcha_dir: Path) -> None:
         """contacts excludes current user by default."""
@@ -381,24 +443,26 @@ class TestAgents:
         _ = _create_user(atcha_dir, "bob-dev", "B")
 
         env = {"ATCHA_TOKEN": alice_token, "ATCHA_DIR": str(atcha_dir)}
-        result = run_cli("contacts", "--names-only", env=env, cwd=str(cwd))
+        result = run_cli("contacts", env=env, cwd=str(cwd))
         assert result.returncode == 0
-        lines = result.stdout.strip().split("\n")
-        assert "alice-dev" not in lines
-        assert "bob-dev" in lines
+        profiles = json.loads(result.stdout)
+        names = [p["name"] for p in profiles]
+        assert "alice-dev" not in names
+        assert "bob-dev" in names
 
     def test_include_self(self, atcha_dir: Path) -> None:
-        """agents list --include-self includes current user."""
+        """contacts --include-self includes current user."""
         cwd = atcha_dir.parent
         alice_token = _create_user(atcha_dir, "alice-dev", "A")
         _ = _create_user(atcha_dir, "bob-dev", "B")
 
         env = {"ATCHA_TOKEN": alice_token, "ATCHA_DIR": str(atcha_dir)}
-        result = run_cli("contacts", "--include-self", "--names-only", "--include-self", env=env, cwd=str(cwd))
+        result = run_cli("contacts", "--include-self", env=env, cwd=str(cwd))
         assert result.returncode == 0
-        lines = result.stdout.strip().split("\n")
-        assert "alice-dev" in lines
-        assert "bob-dev" in lines
+        profiles = json.loads(result.stdout)
+        names = [p["name"] for p in profiles]
+        assert "alice-dev" in names
+        assert "bob-dev" in names
 
     def test_admin_sees_all(self, atcha_dir: Path) -> None:
         """Admin sees all agents without exclusion."""
@@ -407,38 +471,38 @@ class TestAgents:
         _ = _create_user(atcha_dir, "bob-dev", "B")
 
         env = _admin_env(atcha_dir)
-        result = run_cli("contacts", "--include-self", "--names-only", env=env, cwd=str(cwd))
+        result = run_cli("contacts", "--include-self", env=env, cwd=str(cwd))
         assert result.returncode == 0
-        lines = result.stdout.strip().split("\n")
-        assert "alice-dev" in lines
-        assert "bob-dev" in lines
+        profiles = json.loads(result.stdout)
+        names = [p["name"] for p in profiles]
+        assert "alice-dev" in names
+        assert "bob-dev" in names
 
     def test_filter_by_tags(self, atcha_dir: Path) -> None:
-        """agents list --tags filters agents by tag."""
+        """contacts --tags filters agents by tag."""
         cwd = atcha_dir.parent
-        env = {"ATCHA_DIR": str(atcha_dir)}
         admin_env = _admin_env(atcha_dir)
-        _ = run_cli("admin", "users", "add", "--name=backend-dev", "--role=Backend", "--tags=backend,api", env=admin_env, cwd=str(cwd))
-        _ = run_cli("admin", "users", "add", "--name=frontend-dev", "--role=Frontend", "--tags=frontend,ui", env=admin_env, cwd=str(cwd))
+        _ = run_cli("admin", "users", "create", "--name=backend-dev", "--role=Backend", "--tags=backend,api", env=admin_env, cwd=str(cwd))
+        _ = run_cli("admin", "users", "create", "--name=frontend-dev", "--role=Frontend", "--tags=frontend,ui", env=admin_env, cwd=str(cwd))
 
-        result = run_cli("contacts", "--include-self", "--names-only", "--tags=backend", env=env, cwd=str(cwd))
+        result = run_cli("contacts", "--include-self", "--tags=backend", env=admin_env, cwd=str(cwd))
         assert result.returncode == 0
-        lines = result.stdout.strip().split("\n")
-        assert "backend-dev" in lines
-        assert "frontend-dev" not in lines
+        profiles = json.loads(result.stdout)
+        names = [p["name"] for p in profiles]
+        assert "backend-dev" in names
+        assert "frontend-dev" not in names
 
     def test_get_user(self, atcha_dir: Path) -> None:
         """agents get <id or name> returns profile JSON (without dates by default)."""
         cwd = atcha_dir.parent
-        env = {"ATCHA_DIR": str(atcha_dir)}
         admin_env = _admin_env(atcha_dir)
-        _ = run_cli("admin", "users", "add", "--name=test-user", "--role=Test Title", env=admin_env, cwd=str(cwd))
+        _ = run_cli("admin", "users", "create", "--name=test-user", "--role=Test Title", env=admin_env, cwd=str(cwd))
 
         # Can get by name
-        result = run_cli("contacts", "test-user", env=env, cwd=str(cwd))
+        result = run_cli("contacts", "show", "test-user", env=admin_env, cwd=str(cwd))
         assert result.returncode == 0
         profile: dict[str, T.Any] = json.loads(result.stdout)
-        assert len(profile["id"]) == 5  # Random 5-char id
+        assert profile["id"].startswith("usr-")  # Random usr-XXXXX id
         assert profile["name"] == "test-user"
         assert profile["role"] == "Test Title"
         assert "joined" not in profile  # No dates by default
@@ -446,26 +510,25 @@ class TestAgents:
     def test_full_flag(self, atcha_dir: Path) -> None:
         """--full includes joined/updated dates."""
         cwd = atcha_dir.parent
-        env = {"ATCHA_DIR": str(atcha_dir)}
         admin_env = _admin_env(atcha_dir)
-        _ = run_cli("admin", "users", "add", "--name=test-user", "--role=Test", env=admin_env, cwd=str(cwd))
+        _ = run_cli("admin", "users", "create", "--name=test-user", "--role=Test", env=admin_env, cwd=str(cwd))
 
         # agents get --full
-        result = run_cli("contacts", "test-user", "--full", env=env, cwd=str(cwd))
+        result = run_cli("contacts", "show", "test-user", "--full", env=admin_env, cwd=str(cwd))
         assert result.returncode == 0
         profile: dict[str, T.Any] = json.loads(result.stdout)
         assert "joined" in profile
         assert "updated" in profile
 
         # agents list --full
-        result = run_cli("contacts", "--include-self", "--full", env=env, cwd=str(cwd))
+        result = run_cli("contacts", "--include-self", "--full", env=admin_env, cwd=str(cwd))
         profiles = json.loads(result.stdout)
         assert "joined" in profiles[0]
 
     def test_empty_when_no_agents(self, atcha_dir: Path) -> None:
         cwd = atcha_dir.parent
-        env = {"ATCHA_DIR": str(atcha_dir)}
-        result = run_cli("contacts", "--include-self", env=env, cwd=str(cwd))
+        admin_env = _admin_env(atcha_dir)
+        result = run_cli("contacts", "--include-self", env=admin_env, cwd=str(cwd))
         assert result.returncode == 0
         profiles = json.loads(result.stdout)
         assert profiles == []
@@ -486,36 +549,44 @@ class TestProfile:
         assert whoami_result.returncode == 0
         username = whoami_result.stdout.strip()
 
-        result = run_cli("contacts", username, env=env, cwd=str(cwd))
+        result = run_cli("contacts", "show", username, env=env, cwd=str(cwd))
         assert result.returncode == 0
         profile: dict[str, T.Any] = json.loads(result.stdout)
-        assert len(profile["id"]) == 5  # Random 5-char id
+        assert profile["id"].startswith("usr-")  # Random usr-XXXXX id
         assert profile["name"] == "test-user"
         assert profile["role"] == "Test User"
 
     def test_view_other_profile(self, atcha_dir: Path) -> None:
-        """View another user's profile via 'agents get <id or name>' (public, no auth required)."""
+        """View another user's profile requires auth."""
         cwd = atcha_dir.parent
-        env = _admin_env(atcha_dir)
-        _ = run_cli("admin", "users", "add", "--name=other-user", "--role=Other", env=env, cwd=str(cwd))
+        admin_env = _admin_env(atcha_dir)
+        _ = run_cli("admin", "users", "create", "--name=other-user", "--role=Other", env=admin_env, cwd=str(cwd))
+        viewer_token = _create_user(atcha_dir, "viewer", "Viewer")
 
-        # View without auth (public) - uses 'agents get <name>'
-        env_no_token = {"ATCHA_DIR": str(atcha_dir)}
-        result = run_cli("contacts", "other-user", env=env_no_token, cwd=str(cwd))
+        # View with auth
+        env = {"ATCHA_TOKEN": viewer_token, "ATCHA_DIR": str(atcha_dir)}
+        result = run_cli("contacts", "show", "other-user", env=env, cwd=str(cwd))
         assert result.returncode == 0
         profile: dict[str, T.Any] = json.loads(result.stdout)
-        assert len(profile["id"]) == 5  # Random 5-char id
+        assert profile["id"].startswith("usr-")  # Random usr-XXXXX id
         assert profile["name"] == "other-user"
 
-    def test_whoami_returns_username(self, atcha_dir: Path) -> None:
-        """whoami returns just the username (directory name)."""
+        # View without auth works (contacts show is read-only)
+        env_no_token = {"ATCHA_DIR": str(atcha_dir)}
+        result = run_cli("contacts", "show", "other-user", env=env_no_token, cwd=str(cwd))
+        assert result.returncode == 0
+        profile_no_auth: dict[str, T.Any] = json.loads(result.stdout)
+        assert profile_no_auth["name"] == "other-user"
+
+    def test_whoami_returns_address(self, atcha_dir: Path) -> None:
+        """whoami returns address format (name@) by default."""
         cwd = atcha_dir.parent
         user_token = _create_user(atcha_dir, "maya-backend", "Backend Engineer")
         env = {"ATCHA_TOKEN": user_token, "ATCHA_DIR": str(atcha_dir)}
 
         result = run_cli("whoami", env=env, cwd=str(cwd))
         assert result.returncode == 0
-        assert result.stdout.strip() == "maya-backend"
+        assert result.stdout.strip() == "maya-backend@"
 
     def test_whoami_requires_token(self, atcha_dir: Path) -> None:
         """whoami requires authentication."""
@@ -549,20 +620,23 @@ class TestAgentsUpdate:
         assert profile["tags"] == ["testing", "qa"]
         assert profile["about"] == "I write tests"
 
-    def test_updates_role_requires_admin(self, atcha_dir: Path) -> None:
-        """Role updates require admin auth."""
+    def test_profile_update_rejects_role(self, atcha_dir: Path) -> None:
+        """profile update no longer accepts --role (admin-only via admin users update)."""
         cwd = atcha_dir.parent
         user_token = _create_user(atcha_dir, "test-user", "Junior Dev")
         env = {"ATCHA_TOKEN": user_token, "ATCHA_DIR": str(atcha_dir)}
 
-        # Users cannot update their own role
+        # --role is not a valid flag for profile update
         result = run_cli("profile", "update", "--role=Senior Dev", env=env, cwd=str(cwd))
         assert result.returncode != 0
-        assert "Only admins can update roles" in result.stderr
 
-        # Admin can update role
+    def test_admin_updates_role_via_admin_users(self, atcha_dir: Path) -> None:
+        """Admin updates role via 'admin users update', not 'profile update'."""
+        cwd = atcha_dir.parent
+        _ = _create_user(atcha_dir, "test-user", "Junior Dev")
         admin_env = _admin_env(atcha_dir)
-        result = run_cli("profile", "update", "--name=test-user", "--role=Senior Dev", env=admin_env, cwd=str(cwd))
+
+        result = run_cli("admin", "users", "update", "test-user@", "--role=Senior Dev", env=admin_env, cwd=str(cwd))
         assert result.returncode == 0
         profile: dict[str, T.Any] = json.loads(result.stdout)
         assert profile["role"] == "Senior Dev"
@@ -575,21 +649,21 @@ class TestAgentsUpdate:
 
         # Update then get
         _ = run_cli("profile", "update", "--status=Updated", env=env, cwd=str(cwd))
-        result = run_cli("contacts", "test-user", env=env, cwd=str(cwd))
+        result = run_cli("contacts", "show", "test-user", env=env, cwd=str(cwd))
         assert result.returncode == 0
         profile: dict[str, T.Any] = json.loads(result.stdout)
-        assert len(profile["id"]) == 5  # Random 5-char id
+        assert profile["id"].startswith("usr-")  # Random usr-XXXXX id
         assert profile["status"] == "Updated"
 
     def test_admin_updates_other_agent(self, atcha_dir: Path) -> None:
-        """Admin can update another agent's profile with --name."""
+        """Admin can update another agent's profile via admin users update."""
         cwd = atcha_dir.parent
         env = _admin_env(atcha_dir)
         _ = _create_user(atcha_dir, "target-agent", "Original Role")
 
+        # Update role via admin users update (requires address format)
         result = run_cli(
-            "profile", "update",
-            "--name=target-agent",
+            "admin", "users", "update", "target-agent@",
             "--role=New Role",
             "--status=Busy",
             env=env, cwd=str(cwd),
@@ -641,22 +715,22 @@ class TestMessagesCheck:
         assert result.returncode != 0
         assert "--password authenticates as admin" in result.stderr
 
-    def test_admin_impersonation(self, atcha_dir: Path) -> None:
-        """messages check: admin can use --user to check another user's inbox."""
+    def test_admin_as_user(self, atcha_dir: Path) -> None:
+        """messages check: admin can use --as-user with user ID to check another user's inbox."""
         cwd = atcha_dir.parent
         env = {"ATCHA_DIR": str(atcha_dir)}
 
         # Create users
         sender_token = _create_user(atcha_dir, "sender")
-        _ = _create_user(atcha_dir, "recipient")
+        _, recipient_id = _create_user_full(atcha_dir, "recipient")
 
         # Send a message as sender
         sender_env = {"ATCHA_TOKEN": sender_token, "ATCHA_DIR": str(atcha_dir)}
         _ = run_cli("send", "--to", "recipient", "Hello from sender!", env=sender_env, cwd=str(cwd))
 
-        # Admin checks recipient's inbox using --password and --user (before subcommand)
+        # Admin checks recipient's inbox using --password and --as-user (requires user ID)
         result = run_cli(
-            "messages", f"--password={PASSWORD}", "--user=recipient", "check",
+            "messages", f"--password={PASSWORD}", f"--as-user={recipient_id}", "check",
             env=env, cwd=str(cwd),
         )
         assert result.returncode == 0
@@ -667,6 +741,15 @@ class TestMessagesCheck:
 
 
 class TestMessagesRead:
+    def test_requires_ids(self, atcha_dir: Path) -> None:
+        """messages read without IDs returns an error."""
+        cwd = atcha_dir.parent
+        user_token = _create_user(atcha_dir, "test-user")
+        env = {"ATCHA_TOKEN": user_token, "ATCHA_DIR": str(atcha_dir)}
+
+        result = run_cli("messages", "read", env=env, cwd=str(cwd))
+        assert result.returncode != 0
+
     def test_reads_and_marks(self, atcha_dir: Path) -> None:
         cwd = atcha_dir.parent
 
@@ -678,9 +761,13 @@ class TestMessagesRead:
         sender_env = {"ATCHA_TOKEN": sender_token, "ATCHA_DIR": str(atcha_dir)}
         _ = run_cli("send", "--to", "recipient", "Hello!", env=sender_env, cwd=str(cwd))
 
-        # Read inbox
+        # Get message ID from inbox
+        inbox = atcha_dir / "users" / "recipient" / "messages" / "inbox.jsonl"
+        msg_id: str = json.loads(inbox.read_text().strip())["id"]
+
+        # Read by ID
         recipient_env = {"ATCHA_TOKEN": recipient_token, "ATCHA_DIR": str(atcha_dir)}
-        result = run_cli("messages", "read", env=recipient_env, cwd=str(cwd))
+        result = run_cli("messages", "read", msg_id, env=recipient_env, cwd=str(cwd))
         assert result.returncode == 0
         msg: dict[str, str] = json.loads(result.stdout.strip())
         assert msg["from"] == "sender"
@@ -689,15 +776,6 @@ class TestMessagesRead:
         # Should be marked as read now
         result = run_cli("messages", "check", env=recipient_env, cwd=str(cwd))
         assert "No messages" in result.stdout
-
-    def test_silent_on_empty(self, atcha_dir: Path) -> None:
-        cwd = atcha_dir.parent
-        user_token = _create_user(atcha_dir, "test-user")
-        env = {"ATCHA_TOKEN": user_token, "ATCHA_DIR": str(atcha_dir)}
-
-        result = run_cli("messages", "read", env=env, cwd=str(cwd))
-        assert result.returncode == 0
-        assert result.stdout == ""
 
     def test_excludes_to_field_by_default(self, atcha_dir: Path) -> None:
         """messages read excludes 'to' field for regular agents (it's redundant)."""
@@ -709,76 +787,38 @@ class TestMessagesRead:
         sender_env = {"ATCHA_TOKEN": sender_token, "ATCHA_DIR": str(atcha_dir)}
         _ = run_cli("send", "--to", "recipient", "Hello!", env=sender_env, cwd=str(cwd))
 
-        # Read inbox - 'to' should NOT be in output
+        # Get message ID
+        inbox = atcha_dir / "users" / "recipient" / "messages" / "inbox.jsonl"
+        msg_id: str = json.loads(inbox.read_text().strip())["id"]
+
+        # Read by ID - 'to' should NOT be in output
         recipient_env = {"ATCHA_TOKEN": recipient_token, "ATCHA_DIR": str(atcha_dir)}
-        result = run_cli("messages", "read", env=recipient_env, cwd=str(cwd))
+        result = run_cli("messages", "read", msg_id, env=recipient_env, cwd=str(cwd))
         assert result.returncode == 0
         msg: dict[str, str] = json.loads(result.stdout.strip())
         assert "to" not in msg
         assert msg["from"] == "sender"
 
     def test_includes_to_field_for_admin(self, atcha_dir: Path) -> None:
-        """messages read includes 'to' field when admin is impersonating."""
+        """messages read includes 'to' field when admin uses --as-user."""
         cwd = atcha_dir.parent
         sender_token = _create_user(atcha_dir, "sender")
-        _ = _create_user(atcha_dir, "recipient")
+        _, recipient_id = _create_user_full(atcha_dir, "recipient")
 
         # Send a message
         sender_env = {"ATCHA_TOKEN": sender_token, "ATCHA_DIR": str(atcha_dir)}
         _ = run_cli("send", "--to", "recipient", "Hello!", env=sender_env, cwd=str(cwd))
 
-        # Read inbox as admin - 'to' should be included (args before subcommand)
+        # Get message ID
+        inbox = atcha_dir / "users" / "recipient" / "messages" / "inbox.jsonl"
+        msg_id: str = json.loads(inbox.read_text().strip())["id"]
+
+        # Read as admin acting as recipient (--as-user requires user ID)
         admin_env = _admin_env(atcha_dir)
-        result = run_cli("messages", "--user=recipient", "read", env=admin_env, cwd=str(cwd))
+        result = run_cli("messages", f"--as-user={recipient_id}", "read", msg_id, env=admin_env, cwd=str(cwd))
         assert result.returncode == 0
         msg: dict[str, T.Any] = json.loads(result.stdout.strip())
         assert msg["to"] == ["recipient"]
-
-    def test_include_read_filter(self, atcha_dir: Path) -> None:
-        """--include-read shows already-read messages."""
-        cwd = atcha_dir.parent
-        sender_token = _create_user(atcha_dir, "sender")
-        recipient_token = _create_user(atcha_dir, "recipient")
-
-        # Send a message
-        sender_env = {"ATCHA_TOKEN": sender_token, "ATCHA_DIR": str(atcha_dir)}
-        _ = run_cli("send", "--to", "recipient", "Message 1", env=sender_env, cwd=str(cwd))
-
-        # Read inbox (marks as read)
-        recipient_env = {"ATCHA_TOKEN": recipient_token, "ATCHA_DIR": str(atcha_dir)}
-        result = run_cli("messages", "read", env=recipient_env, cwd=str(cwd))
-        assert result.returncode == 0
-        assert "Message 1" in result.stdout
-
-        # Normal read shows nothing (already read)
-        result = run_cli("messages", "read", env=recipient_env, cwd=str(cwd))
-        assert result.returncode == 0
-        assert result.stdout == ""
-
-        # With --include-read, message is shown again
-        result = run_cli("messages", "read", "--include-read", env=recipient_env, cwd=str(cwd))
-        assert result.returncode == 0
-        assert "Message 1" in result.stdout
-
-    def test_from_filter(self, atcha_dir: Path) -> None:
-        """--from filters messages by sender."""
-        cwd = atcha_dir.parent
-        alice_token = _create_user(atcha_dir, "alice-sender")
-        bob_token = _create_user(atcha_dir, "bob-sender")
-        recipient_token = _create_user(atcha_dir, "recipient")
-
-        # Send messages from two senders
-        env1 = {"ATCHA_TOKEN": alice_token, "ATCHA_DIR": str(atcha_dir)}
-        env2 = {"ATCHA_TOKEN": bob_token, "ATCHA_DIR": str(atcha_dir)}
-        _ = run_cli("send", "--to", "recipient", "From alice", env=env1, cwd=str(cwd))
-        _ = run_cli("send", "--to", "recipient", "From bob", env=env2, cwd=str(cwd))
-
-        # Filter by alice-sender
-        recipient_env = {"ATCHA_TOKEN": recipient_token, "ATCHA_DIR": str(atcha_dir)}
-        result = run_cli("messages", "read", "--from=alice-sender", env=recipient_env, cwd=str(cwd))
-        assert result.returncode == 0
-        assert "From alice" in result.stdout
-        assert "From bob" not in result.stdout
 
     def test_no_mark_flag(self, atcha_dir: Path) -> None:
         """--no-mark prevents marking messages as read."""
@@ -790,9 +830,13 @@ class TestMessagesRead:
         sender_env = {"ATCHA_TOKEN": sender_token, "ATCHA_DIR": str(atcha_dir)}
         _ = run_cli("send", "--to", "recipient", "Hello!", env=sender_env, cwd=str(cwd))
 
+        # Get message ID
+        inbox = atcha_dir / "users" / "recipient" / "messages" / "inbox.jsonl"
+        msg_id: str = json.loads(inbox.read_text().strip())["id"]
+
         # Read with --no-mark
         recipient_env = {"ATCHA_TOKEN": recipient_token, "ATCHA_DIR": str(atcha_dir)}
-        result = run_cli("messages", "read", "--no-mark", env=recipient_env, cwd=str(cwd))
+        result = run_cli("messages", "read", "--no-mark", msg_id, env=recipient_env, cwd=str(cwd))
         assert result.returncode == 0
         assert "Hello!" in result.stdout
 
@@ -843,7 +887,7 @@ class TestMessagesList:
 
         # List messages
         recipient_env = {"ATCHA_TOKEN": recipient_token, "ATCHA_DIR": str(atcha_dir)}
-        result = run_cli("messages", "list", env=recipient_env, cwd=str(cwd))
+        result = run_cli("messages", env=recipient_env, cwd=str(cwd))
         assert result.returncode == 0
 
         messages: list[dict[str, T.Any]] = json.loads(result.stdout)
@@ -863,7 +907,7 @@ class TestMessagesList:
 
         # List messages
         recipient_env = {"ATCHA_TOKEN": recipient_token, "ATCHA_DIR": str(atcha_dir)}
-        result = run_cli("messages", "list", env=recipient_env, cwd=str(cwd))
+        result = run_cli("messages", env=recipient_env, cwd=str(cwd))
         assert result.returncode == 0
 
         messages: list[dict[str, T.Any]] = json.loads(result.stdout)
@@ -884,7 +928,7 @@ class TestMessagesList:
 
         # List with --no-preview
         recipient_env = {"ATCHA_TOKEN": recipient_token, "ATCHA_DIR": str(atcha_dir)}
-        result = run_cli("messages", "list", "--no-preview", env=recipient_env, cwd=str(cwd))
+        result = run_cli("messages", "--no-preview", env=recipient_env, cwd=str(cwd))
         assert result.returncode == 0
 
         messages: list[dict[str, T.Any]] = json.loads(result.stdout)
@@ -905,7 +949,7 @@ class TestMessagesList:
 
         # List messages (should NOT mark as read)
         recipient_env = {"ATCHA_TOKEN": recipient_token, "ATCHA_DIR": str(atcha_dir)}
-        result = run_cli("messages", "list", env=recipient_env, cwd=str(cwd))
+        result = run_cli("messages", env=recipient_env, cwd=str(cwd))
         assert result.returncode == 0
         messages: list[dict[str, T.Any]] = json.loads(result.stdout)
         assert len(messages) == 1
@@ -927,7 +971,7 @@ class TestMessagesList:
 
         # List with limit
         recipient_env = {"ATCHA_TOKEN": recipient_token, "ATCHA_DIR": str(atcha_dir)}
-        result = run_cli("messages", "list", "--limit=2", env=recipient_env, cwd=str(cwd))
+        result = run_cli("messages", "--limit=2", env=recipient_env, cwd=str(cwd))
         assert result.returncode == 0
 
         messages: list[dict[str, T.Any]] = json.loads(result.stdout)
@@ -948,7 +992,7 @@ class TestMessagesList:
 
         # Filter by alice
         recipient_env = {"ATCHA_TOKEN": recipient_token, "ATCHA_DIR": str(atcha_dir)}
-        result = run_cli("messages", "list", "--from=alice", env=recipient_env, cwd=str(cwd))
+        result = run_cli("messages", "--from=alice", env=recipient_env, cwd=str(cwd))
         assert result.returncode == 0
 
         messages: list[dict[str, T.Any]] = json.loads(result.stdout)
@@ -968,7 +1012,7 @@ class TestMessagesList:
 
         # List should work and show preview from 'body' field
         recipient_env = {"ATCHA_TOKEN": recipient_token, "ATCHA_DIR": str(atcha_dir)}
-        result = run_cli("messages", "list", env=recipient_env, cwd=str(cwd))
+        result = run_cli("messages", env=recipient_env, cwd=str(cwd))
         assert result.returncode == 0
 
         messages: list[dict[str, T.Any]] = json.loads(result.stdout)
@@ -998,7 +1042,7 @@ class TestSend:
         # Verify message in recipient inbox
         inbox = atcha_dir / "users" / "recipient" / "messages" / "inbox.jsonl"
         msg: dict[str, T.Any] = json.loads(inbox.read_text().strip())
-        assert msg["from"] == "sender"
+        assert msg["from"]["name"] == "sender"
         assert msg["content"] == "Test message"
 
         # Verify message in sender sent
@@ -1029,18 +1073,18 @@ class TestSend:
         msg: dict[str, T.Any] = json.loads(inbox.read_text().strip())
         assert msg["content"] == body
 
-    def test_admin_send_on_behalf(self, atcha_dir: Path) -> None:
-        """send: admin can use --user to send on behalf of another user."""
+    def test_admin_send_as_user(self, atcha_dir: Path) -> None:
+        """send: admin can use --as-user with user ID to send as another user."""
         cwd = atcha_dir.parent
         env = {"ATCHA_DIR": str(atcha_dir)}
 
-        # Create users
-        _ = _create_user(atcha_dir, "alice")
+        # Create users (need alice's user ID for --as-user)
+        _, alice_id = _create_user_full(atcha_dir, "alice")
         _ = _create_user(atcha_dir, "bob")
 
-        # Admin sends from alice to bob
+        # Admin sends from alice to bob (--as-user requires user ID)
         result = run_cli(
-            "send", "--user=alice", f"--password={PASSWORD}",
+            "send", f"--as-user={alice_id}", f"--password={PASSWORD}",
             "--to", "bob", "Hello from alice (sent by admin)",
             env=env, cwd=str(cwd),
         )
@@ -1049,7 +1093,7 @@ class TestSend:
         # Verify message in bob's inbox shows alice as sender
         inbox = atcha_dir / "users" / "bob" / "messages" / "inbox.jsonl"
         msg: dict[str, T.Any] = json.loads(inbox.read_text().strip())
-        assert msg["from"] == "alice"
+        assert msg["from"]["name"] == "alice"
         assert msg["content"] == "Hello from alice (sent by admin)"
 
         # Verify message in alice's sent log
@@ -1092,7 +1136,7 @@ class TestSend:
         _ = _create_user(atcha_dir, "bob")
 
         sender_env = {"ATCHA_TOKEN": sender_token, "ATCHA_DIR": str(atcha_dir)}
-        result = run_cli("send", "--all", "Broadcast message", env=sender_env, cwd=str(cwd))
+        result = run_cli("send", "--broadcast", "Broadcast message", env=sender_env, cwd=str(cwd))
         assert result.returncode == 0
 
         response: dict[str, T.Any] = json.loads(result.stdout)
@@ -1177,7 +1221,7 @@ class TestSend:
         msg_id = msg["id"]
 
         # Try --all with --reply-to (should error)
-        result = run_cli("send", "--all", "--reply-to", msg_id, "Test", env=sender_env, cwd=str(cwd))
+        result = run_cli("send", "--broadcast", "--reply-to", msg_id, "Test", env=sender_env, cwd=str(cwd))
         assert result.returncode != 0
         assert "ambiguous" in result.stderr.lower()
 
@@ -1221,13 +1265,13 @@ class TestSend:
 class TestEnv:
     def test_outputs_exports(self, atcha_dir: Path) -> None:
         cwd = atcha_dir.parent
-        result = run_cli("env", cwd=str(cwd))
+        result = run_cli("admin", "envs", cwd=str(cwd))
         assert result.returncode == 0
         assert "ATCHA_DIR" in result.stdout
         assert str(atcha_dir) in result.stdout
 
     def test_silent_when_no_dir(self, tmp_path: Path) -> None:
-        result = run_cli("env", cwd=str(tmp_path))
+        result = run_cli("admin", "envs", cwd=str(tmp_path))
         assert result.returncode == 0
         assert result.stdout == ""
 
@@ -1238,10 +1282,13 @@ class TestEnv:
 class TestUsernameValidation:
     def test_valid_names(self) -> None:
         import importlib.util
+        import sys
 
         spec = importlib.util.spec_from_file_location("atcha", CLI)
         assert spec is not None
         module = importlib.util.module_from_spec(spec)
+        # Register module so dataclasses can resolve cls.__module__ (Python 3.14+)
+        sys.modules["atcha"] = module
         assert spec.loader is not None
         spec.loader.exec_module(module)
 
@@ -1258,10 +1305,12 @@ class TestUsernameValidation:
 
     def test_invalid_names(self) -> None:
         import importlib.util
+        import sys
 
         spec = importlib.util.spec_from_file_location("atcha", CLI)
         assert spec is not None
         module = importlib.util.module_from_spec(spec)
+        sys.modules["atcha"] = module
         assert spec.loader is not None
         spec.loader.exec_module(module)
 
@@ -1285,10 +1334,12 @@ class TestUsernameValidation:
 class TestTokenValidation:
     def test_token_identifies_user(self, atcha_dir: Path) -> None:
         import importlib.util
+        import sys
 
         spec = importlib.util.spec_from_file_location("atcha", CLI)
         assert spec is not None
         module = importlib.util.module_from_spec(spec)
+        sys.modules["atcha"] = module
         assert spec.loader is not None
         spec.loader.exec_module(module)
 
@@ -1323,7 +1374,7 @@ class TestTokenValidation:
         env = {"ATCHA_DIR": str(atcha_dir)}  # No ATCHA_TOKEN
         result = run_cli("whoami", f"--token={user_token}", env=env, cwd=str(cwd))
         assert result.returncode == 0
-        assert result.stdout.strip() == "cli-test-user"
+        assert result.stdout.strip() == "cli-test-user@"
 
 
 # ---------- Integration test ----------
@@ -1333,7 +1384,7 @@ class TestIntegration:
     def test_full_workflow(self, tmp_path: Path) -> None:
         """Full workflow: init → create agents → create-token → send mail → read mail."""
         # 1. Initialize
-        result = run_cli("init", f"--password={PASSWORD}", cwd=str(tmp_path))
+        result = run_cli("admin", "init", f"--password={PASSWORD}", cwd=str(tmp_path))
         assert result.returncode == 0
 
         atcha_dir = tmp_path / ".atcha"
@@ -1343,24 +1394,24 @@ class TestIntegration:
 
         # 3. Create users
         result = run_cli(
-            "admin", "users", "add", "--name=maya-backend", "--role=Backend Engineer",
+            "admin", "users", "create", "--name=maya-backend", "--role=Backend Engineer",
             "--tags=backend,auth",
             env=admin_env, cwd=str(tmp_path),
         )
         assert result.returncode == 0
 
         result = run_cli(
-            "admin", "users", "add", "--name=alex-frontend", "--role=Frontend Dev",
+            "admin", "users", "create", "--name=alex-frontend", "--role=Frontend Dev",
             "--tags=frontend,ui",
             env=admin_env, cwd=str(tmp_path),
         )
         assert result.returncode == 0
 
         # 4. Get user tokens
-        result = run_cli("create-token", "--user", "maya-backend", f"--password={PASSWORD}", cwd=str(tmp_path))
+        result = run_cli("admin", "create-token", "--user", "maya-backend", f"--password={PASSWORD}", cwd=str(tmp_path))
         maya_token = result.stdout.strip()
 
-        result = run_cli("create-token", "--user", "alex-frontend", f"--password={PASSWORD}", cwd=str(tmp_path))
+        result = run_cli("admin", "create-token", "--user", "alex-frontend", f"--password={PASSWORD}", cwd=str(tmp_path))
         alex_token = result.stdout.strip()
 
         # 5. Maya sends message to Alex
@@ -1373,11 +1424,13 @@ class TestIntegration:
         result = run_cli("messages", "check", env=alex_env, cwd=str(tmp_path))
         assert "1 unread message from maya-backend" in result.stdout
 
-        # 7. Alex reads messages
-        result = run_cli("messages", "read", env=alex_env, cwd=str(tmp_path))
+        # 7. Alex reads messages (get IDs from inbox first)
+        alex_inbox = atcha_dir / "users" / "alex-frontend" / "messages" / "inbox.jsonl"
+        alex_msg_id: str = json.loads(alex_inbox.read_text().strip())["id"]
+        result = run_cli("messages", "read", alex_msg_id, env=alex_env, cwd=str(tmp_path))
         assert result.returncode == 0
         msg: dict[str, T.Any] = json.loads(result.stdout.strip())
-        assert msg["from"] == "maya-backend"
+        assert msg["from"] == "maya-backend"  # CLI output has from as formatted string
         assert msg["content"] == "API is ready for integration"
 
         # 8. Inbox should be empty now
@@ -1388,8 +1441,502 @@ class TestIntegration:
         result = run_cli("send", "--to", "maya-backend", "Thanks! Starting integration now.", env=alex_env, cwd=str(tmp_path))
         assert result.returncode == 0
 
-        # 10. Maya reads reply
-        result = run_cli("messages", "read", env=maya_env, cwd=str(tmp_path))
+        # 10. Maya reads reply (get ID from inbox)
+        maya_inbox = atcha_dir / "users" / "maya-backend" / "messages" / "inbox.jsonl"
+        maya_msg_id: str = json.loads(maya_inbox.read_text().strip())["id"]
+        result = run_cli("messages", "read", maya_msg_id, env=maya_env, cwd=str(tmp_path))
         msg = json.loads(result.stdout.strip())
         assert msg["from"] == "alex-frontend"
         assert "integration" in msg["content"]
+
+
+# ---------- Federation ----------
+
+
+def _create_federated_space(base_path: Path, space_name: str) -> Path:
+    """Create and initialize a second .atcha directory for federation testing.
+
+    Creates a new directory under base_path and initializes atcha there.
+    Uses explicit ATCHA_DIR to prevent auto-discovery from walking up to parent .atcha.
+    """
+    space_dir = base_path / space_name
+    space_dir.mkdir(parents=True, exist_ok=True)
+    new_atcha_dir = space_dir / ".atcha"
+    # Run init with ATCHA_DIR unset (empty string) to force fresh initialization
+    # We need to remove ATCHA_DIR from env to prevent it from finding parent .atcha
+    env = {k: v for k, v in os.environ.items() if k != "ATCHA_DIR"}
+    result = run_cli("admin", "init", f"--password={PASSWORD}", env=env, cwd=str(space_dir))
+    assert result.returncode == 0, f"Failed to init {space_name}: {result.stderr}"
+    return new_atcha_dir
+
+
+@pytest.fixture
+def federation_base(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Create an isolated base directory for federation tests.
+
+    Uses tmp_path_factory to create a completely separate directory tree,
+    preventing atcha init from walking up and finding the test's main .atcha dir.
+    """
+    return tmp_path_factory.mktemp("federation")
+
+
+class TestFederationSpaceIdentity:
+    """Tests for FR-001: Space Identity."""
+
+    def test_init_creates_space_json(self, tmp_path: Path) -> None:
+        """atcha init creates space.json with id and name."""
+        result = run_cli("admin", "init", f"--password={PASSWORD}", cwd=str(tmp_path))
+        assert result.returncode == 0
+
+        space_file = tmp_path / ".atcha" / "space.json"
+        assert space_file.exists()
+
+        space_config = json.loads(space_file.read_text())
+        assert "id" in space_config
+        assert space_config["id"].startswith("spc-")
+        assert len(space_config["id"]) == 9  # spc- + 5 chars
+        assert "name" in space_config
+        assert "created" in space_config
+
+    def test_space_id_format(self, tmp_path: Path) -> None:
+        """Space ID has format spc-{5-char} with valid alphabet."""
+        _ = run_cli("admin", "init", f"--password={PASSWORD}", cwd=str(tmp_path))
+        space_config = json.loads((tmp_path / ".atcha" / "space.json").read_text())
+
+        space_id = space_config["id"]
+        assert space_id.startswith("spc-")
+        # 5 chars from alphabet: 23456789abcdefghjkmnpqrstuvwxyz
+        suffix = space_id[4:]
+        assert len(suffix) == 5
+        valid_chars = set("23456789abcdefghjkmnpqrstuvwxyz")
+        assert all(c in valid_chars for c in suffix)
+
+    def test_name_derived_from_directory(self, tmp_path: Path) -> None:
+        """Space name is derived from parent directory name."""
+        project_dir = tmp_path / "My_Cool_Project"
+        project_dir.mkdir()
+        _ = run_cli("admin", "init", f"--password={PASSWORD}", cwd=str(project_dir))
+
+        space_config = json.loads((project_dir / ".atcha" / "space.json").read_text())
+        # Slugified: lowercase, underscores to dashes
+        assert space_config["name"] == "my-cool-project"
+
+    def test_admin_space_rename(self, atcha_dir: Path) -> None:
+        """admin space rename changes name but preserves id."""
+        cwd = atcha_dir.parent
+        env = _admin_env(atcha_dir)
+
+        # Get original config
+        original = json.loads((atcha_dir / "space.json").read_text())
+
+        # Rename space
+        result = run_cli("admin", "spaces", "update", "--name=new-name", env=env, cwd=str(cwd))
+        assert result.returncode == 0
+        output = json.loads(result.stdout)
+        assert output["status"] == "updated"
+
+        # Verify ID unchanged, name changed
+        updated = json.loads((atcha_dir / "space.json").read_text())
+        assert updated["id"] == original["id"]
+        assert updated["name"] == "new-name"
+
+
+class TestFederationRegistry:
+    """Tests for FR-002: Federation Registration."""
+
+    def test_admin_federated_add(self, atcha_dir: Path, federation_base: Path) -> None:
+        """admin federated add registers a remote space."""
+        cwd = atcha_dir.parent
+        env = _admin_env(atcha_dir)
+
+        # Create a second space
+        remote_atcha = _create_federated_space(federation_base, "remote-project")
+
+        # Register it
+        result = run_cli("admin", "spaces", "add", str(remote_atcha), env=env, cwd=str(cwd))
+        assert result.returncode == 0
+        output = json.loads(result.stdout)
+        assert output["status"] == "added"
+        assert output["id"].startswith("spc-")
+
+        # Verify federation.local.json
+        federation = json.loads((atcha_dir / "federation.local.json").read_text())
+        assert len(federation["spaces"]) == 1
+        assert federation["spaces"][0]["path"] == str(remote_atcha)
+
+    def test_admin_federated_add_collision(self, atcha_dir: Path, federation_base: Path) -> None:
+        """admin federated add detects handle collision."""
+        cwd = atcha_dir.parent
+        env = _admin_env(atcha_dir)
+
+        # Create two spaces with same handle
+        remote1 = _create_federated_space(federation_base, "project-a")
+        remote2 = _create_federated_space(federation_base, "project-b")
+
+        # Set same handle on both
+        for remote in [remote1, remote2]:
+            space_config = json.loads((remote / "space.json").read_text())
+            space_config["name"] = "same-handle"
+            (remote / "space.json").write_text(json.dumps(space_config, indent=2) + "\n")
+
+        # Register first
+        result = run_cli("admin", "spaces", "add", str(remote1), env=env, cwd=str(cwd))
+        assert result.returncode == 0
+
+        # Second should fail without --force
+        result = run_cli("admin", "spaces", "add", str(remote2), env=env, cwd=str(cwd))
+        assert result.returncode != 0
+        assert "handle collision" in result.stderr.lower()
+
+        # With --force, should succeed
+        result = run_cli("admin", "spaces", "add", str(remote2), "--force", env=env, cwd=str(cwd))
+        assert result.returncode == 0
+
+    def test_admin_federated_remove(self, atcha_dir: Path, federation_base: Path) -> None:
+        """admin federated remove unregisters a space."""
+        cwd = atcha_dir.parent
+        env = _admin_env(atcha_dir)
+
+        # Create and register a space
+        remote_atcha = _create_federated_space(federation_base, "remote-project")
+        result = run_cli("admin", "spaces", "add", str(remote_atcha), env=env, cwd=str(cwd))
+        assert result.returncode == 0
+        added = json.loads(result.stdout)
+
+        # Remove by handle
+        result = run_cli("admin", "spaces", "drop", added["name"], env=env, cwd=str(cwd))
+        assert result.returncode == 0
+
+        # Verify removed
+        federation = json.loads((atcha_dir / "federation.local.json").read_text())
+        assert len(federation["spaces"]) == 0
+
+    def test_admin_spaces_list(self, atcha_dir: Path, federation_base: Path) -> None:
+        """admin spaces lists local + federated spaces with availability."""
+        cwd = atcha_dir.parent
+        env = _admin_env(atcha_dir)
+
+        # Create and register a space
+        remote_atcha = _create_federated_space(federation_base, "remote-project")
+        _ = run_cli("admin", "spaces", "add", str(remote_atcha), env=env, cwd=str(cwd))
+
+        # List - should include local + 1 remote
+        result = run_cli("admin", "spaces", env=env, cwd=str(cwd))
+        assert result.returncode == 0
+        spaces = json.loads(result.stdout)
+        assert len(spaces) == 2  # local + remote
+        local_spaces = [s for s in spaces if s["scope"] == "local"]
+        remote_spaces = [s for s in spaces if s["scope"] == "federated"]
+        assert len(local_spaces) == 1
+        assert len(remote_spaces) == 1
+        assert remote_spaces[0]["available"] is True
+
+        # Delete the remote space directory
+        import shutil
+        shutil.rmtree(remote_atcha)
+
+        # List again - remote should show unavailable
+        result = run_cli("admin", "spaces", env=env, cwd=str(cwd))
+        spaces = json.loads(result.stdout)
+        remote_spaces = [s for s in spaces if s["scope"] == "federated"]
+        assert remote_spaces[0]["available"] is False
+
+
+class TestFederationContacts:
+    """Tests for FR-003: Cross-Space Contact Discovery."""
+
+    def test_contacts_cross_space(self, atcha_dir: Path, federation_base: Path) -> None:
+        """contacts includes users from federated spaces."""
+        cwd = atcha_dir.parent
+        env = _admin_env(atcha_dir)
+
+        # Create local user
+        local_token = _create_user(atcha_dir, "local-user")
+
+        # Create and register remote space with user
+        remote_atcha = _create_federated_space(federation_base, "remote-project")
+        remote_env = {"ATCHA_ADMIN_PASS": PASSWORD, "ATCHA_DIR": str(remote_atcha)}
+        _ = run_cli("admin", "users", "create", "--name=remote-user", "--role=Remote Dev", env=remote_env, cwd=str(federation_base / "remote-project"))
+
+        # Register remote space
+        _ = run_cli("admin", "spaces", "add", str(remote_atcha), env=env, cwd=str(cwd))
+
+        # List contacts as local user
+        user_env = {"ATCHA_TOKEN": local_token, "ATCHA_DIR": str(atcha_dir)}
+        result = run_cli("contacts", env=user_env, cwd=str(cwd))
+        assert result.returncode == 0
+        contacts = json.loads(result.stdout)
+
+        # Should include remote user with address and scope fields
+        names = [c["name"] for c in contacts]
+        assert "remote-user" in names
+        remote_contact = next(c for c in contacts if c["name"] == "remote-user")
+        assert remote_contact["scope"] == "federated"
+        assert remote_contact["address"] == "remote-user@remote-project"
+
+    def test_contacts_space_filter(self, atcha_dir: Path, federation_base: Path) -> None:
+        """contacts --space filters by space."""
+        cwd = atcha_dir.parent
+        env = _admin_env(atcha_dir)
+
+        # Create local user
+        local_token = _create_user(atcha_dir, "local-user")
+
+        # Create remote space with user
+        remote_atcha = _create_federated_space(federation_base, "remote-project")
+        remote_env = {"ATCHA_ADMIN_PASS": PASSWORD, "ATCHA_DIR": str(remote_atcha)}
+        _ = run_cli("admin", "users", "create", "--name=remote-user", "--role=Remote Dev", env=remote_env, cwd=str(federation_base / "remote-project"))
+
+        # Get remote space handle
+        remote_config = json.loads((remote_atcha / "space.json").read_text())
+        remote_handle = remote_config["name"]
+
+        # Register
+        _ = run_cli("admin", "spaces", "add", str(remote_atcha), env=env, cwd=str(cwd))
+
+        # Filter by remote space
+        user_env = {"ATCHA_TOKEN": local_token, "ATCHA_DIR": str(atcha_dir)}
+        result = run_cli("contacts", f"--space={remote_handle}", env=user_env, cwd=str(cwd))
+        assert result.returncode == 0
+        contacts = json.loads(result.stdout)
+
+        # Should only include remote user
+        assert len(contacts) == 1
+        assert contacts[0]["name"] == "remote-user"
+
+
+class TestFederationMessaging:
+    """Tests for FR-004 and FR-005: Cross-Space Messaging."""
+
+    def test_send_cross_space(self, atcha_dir: Path, federation_base: Path) -> None:
+        """send to user@space works across federated spaces."""
+        cwd = atcha_dir.parent
+        env = _admin_env(atcha_dir)
+
+        # Create local user
+        local_token = _create_user(atcha_dir, "local-user")
+
+        # Create remote space with user
+        remote_atcha = _create_federated_space(federation_base, "remote-project")
+        remote_env = {"ATCHA_ADMIN_PASS": PASSWORD, "ATCHA_DIR": str(remote_atcha)}
+        result = run_cli("admin", "users", "create", "--name=remote-user", "--role=Remote Dev", env=remote_env, cwd=str(federation_base / "remote-project"))
+        assert result.returncode == 0
+
+        # Get remote user token
+        result = run_cli("admin", "create-token", "--user=remote-user", env=remote_env, cwd=str(federation_base / "remote-project"))
+        remote_token = result.stdout.strip()
+
+        # Get remote space handle
+        remote_config = json.loads((remote_atcha / "space.json").read_text())
+        remote_handle = remote_config["name"]
+
+        # Register remote space
+        _ = run_cli("admin", "spaces", "add", str(remote_atcha), env=env, cwd=str(cwd))
+
+        # Send message to remote-user@remote-handle
+        user_env = {"ATCHA_TOKEN": local_token, "ATCHA_DIR": str(atcha_dir)}
+        result = run_cli("send", "--to", f"remote-user@{remote_handle}", "Hello from local!", env=user_env, cwd=str(cwd))
+        assert result.returncode == 0
+
+        # Read message as remote user (get ID from inbox)
+        remote_inbox = remote_atcha / "users" / "remote-user" / "messages" / "inbox.jsonl"
+        remote_msg_id: str = json.loads(remote_inbox.read_text().strip())["id"]
+        remote_user_env = {"ATCHA_TOKEN": remote_token, "ATCHA_DIR": str(remote_atcha)}
+        result = run_cli("messages", "read", remote_msg_id, env=remote_user_env, cwd=str(federation_base / "remote-project"))
+        assert result.returncode == 0
+        msg = json.loads(result.stdout.strip())
+        assert "Hello from local!" in msg["content"]
+        # Sender should show with @space suffix
+        assert "@" in msg["from"]
+
+    def test_send_ambiguous_recipient(self, atcha_dir: Path, federation_base: Path) -> None:
+        """send errors on ambiguous recipient across spaces."""
+        cwd = atcha_dir.parent
+        env = _admin_env(atcha_dir)
+
+        # Create local user named "alice"
+        local_token = _create_user(atcha_dir, "alice")
+
+        # Create local user to be the sender
+        sender_token = _create_user(atcha_dir, "sender")
+
+        # Create remote space with user also named "alice"
+        remote_atcha = _create_federated_space(federation_base, "remote-project")
+        remote_env = {"ATCHA_ADMIN_PASS": PASSWORD, "ATCHA_DIR": str(remote_atcha)}
+        _ = run_cli("admin", "users", "create", "--name=alice", "--role=Remote Alice", env=remote_env, cwd=str(federation_base / "remote-project"))
+
+        # Register remote space
+        _ = run_cli("admin", "spaces", "add", str(remote_atcha), env=env, cwd=str(cwd))
+
+        # Try to send to "alice" without qualification
+        sender_env = {"ATCHA_TOKEN": sender_token, "ATCHA_DIR": str(atcha_dir)}
+        result = run_cli("send", "--to", "alice", "Hello!", env=sender_env, cwd=str(cwd))
+        assert result.returncode != 0
+        assert "ambiguous" in result.stderr.lower()
+
+    def test_message_from_space_display(self, atcha_dir: Path, federation_base: Path) -> None:
+        """Received messages show sender as name@space for cross-space."""
+        cwd = atcha_dir.parent
+        env = _admin_env(atcha_dir)
+
+        # Create local user
+        local_token = _create_user(atcha_dir, "local-user")
+
+        # Create remote space with user
+        remote_atcha = _create_federated_space(federation_base, "remote-project")
+        remote_env = {"ATCHA_ADMIN_PASS": PASSWORD, "ATCHA_DIR": str(remote_atcha)}
+        _ = run_cli("admin", "users", "create", "--name=remote-user", "--role=Remote Dev", env=remote_env, cwd=str(federation_base / "remote-project"))
+
+        # Get remote user token
+        result = run_cli("admin", "create-token", "--user=remote-user", env=remote_env, cwd=str(federation_base / "remote-project"))
+        remote_token = result.stdout.strip()
+
+        # Get space handles
+        local_config = json.loads((atcha_dir / "space.json").read_text())
+        local_handle = local_config["name"]
+
+        # Register local space in remote (for cross-space send)
+        _ = run_cli("admin", "spaces", "add", str(atcha_dir), env=remote_env, cwd=str(federation_base / "remote-project"))
+
+        # Send from remote to local-user@local-handle
+        remote_user_env = {"ATCHA_TOKEN": remote_token, "ATCHA_DIR": str(remote_atcha)}
+        result = run_cli("send", "--to", f"local-user@{local_handle}", "Hello from remote!", env=remote_user_env, cwd=str(federation_base / "remote-project"))
+        assert result.returncode == 0
+
+        # Register remote space in local (for display)
+        _ = run_cli("admin", "spaces", "add", str(remote_atcha), env=env, cwd=str(cwd))
+
+        # Read as local user - should see sender@space (get ID from inbox)
+        local_inbox = atcha_dir / "users" / "local-user" / "messages" / "inbox.jsonl"
+        local_msg_id: str = json.loads(local_inbox.read_text().strip())["id"]
+        user_env = {"ATCHA_TOKEN": local_token, "ATCHA_DIR": str(atcha_dir)}
+        result = run_cli("messages", "read", local_msg_id, env=user_env, cwd=str(cwd))
+        assert result.returncode == 0
+        msg = json.loads(result.stdout.strip())
+        assert "@" in msg["from"]
+
+    def test_from_filter_cross_space(self, atcha_dir: Path, federation_base: Path) -> None:
+        """--from=name@space filters cross-space messages correctly."""
+        cwd = atcha_dir.parent
+        env = _admin_env(atcha_dir)
+
+        # Create local user (recipient)
+        local_token = _create_user(atcha_dir, "local-user")
+
+        # Create remote space with a user
+        remote_atcha = _create_federated_space(federation_base, "remote-proj")
+        remote_env = {"ATCHA_ADMIN_PASS": PASSWORD, "ATCHA_DIR": str(remote_atcha)}
+        result = run_cli("admin", "users", "create", "--name=remote-user", "--role=Remote Dev", env=remote_env, cwd=str(federation_base / "remote-proj"))
+        assert result.returncode == 0
+
+        # Get remote user token
+        result = run_cli("admin", "create-token", "--user=remote-user", env=remote_env, cwd=str(federation_base / "remote-proj"))
+        remote_token = result.stdout.strip()
+
+        # Get space handles
+        local_config = json.loads((atcha_dir / "space.json").read_text())
+        local_handle = local_config["name"]
+        remote_config = json.loads((remote_atcha / "space.json").read_text())
+        remote_handle = remote_config["name"]
+
+        # Register local space in remote (so remote can send to local)
+        _ = run_cli("admin", "spaces", "add", str(atcha_dir), env=remote_env, cwd=str(federation_base / "remote-proj"))
+        # Register remote space in local (so local can display sender@space)
+        _ = run_cli("admin", "spaces", "add", str(remote_atcha), env=env, cwd=str(cwd))
+
+        # Also create a local sender to send a local message
+        local_sender_token = _create_user(atcha_dir, "local-sender")
+        local_sender_env = {"ATCHA_TOKEN": local_sender_token, "ATCHA_DIR": str(atcha_dir)}
+        _ = run_cli("send", "--to", "local-user", "Local message", env=local_sender_env, cwd=str(cwd))
+
+        # Send from remote to local-user@local-handle
+        remote_user_env = {"ATCHA_TOKEN": remote_token, "ATCHA_DIR": str(remote_atcha)}
+        result = run_cli("send", "--to", f"local-user@{local_handle}", "Cross-space message", env=remote_user_env, cwd=str(federation_base / "remote-proj"))
+        assert result.returncode == 0
+
+        # Read with --from=remote-user@remote-handle: should only get the cross-space msg
+        user_env = {"ATCHA_TOKEN": local_token, "ATCHA_DIR": str(atcha_dir)}
+        result = run_cli("messages", f"--from=remote-user@{remote_handle}", env=user_env, cwd=str(cwd))
+        assert result.returncode == 0
+        messages = json.loads(result.stdout)
+        assert len(messages) == 1
+        assert "Cross-space" in messages[0].get("preview", messages[0].get("content", ""))
+
+        # --from=remote-user@wrong-space should return nothing
+        result = run_cli("messages", "--from=remote-user@wrong-space", env=user_env, cwd=str(cwd))
+        assert result.returncode == 0
+        messages = json.loads(result.stdout)
+        assert len(messages) == 0
+
+        # --from=remote-user (bare name) should still match the cross-space message
+        result = run_cli("messages", "--from=remote-user", env=user_env, cwd=str(cwd))
+        assert result.returncode == 0
+        messages = json.loads(result.stdout)
+        assert len(messages) == 1
+
+
+class TestFederationBackwardCompat:
+    """Tests for FR-006: Backward Compatibility."""
+
+    def test_backward_compat_no_space_json(self, tmp_path: Path) -> None:
+        """Existing spaces without space.json get auto-upgraded on federation-aware commands."""
+        # Initialize space
+        result = run_cli("admin", "init", f"--password={PASSWORD}", cwd=str(tmp_path))
+        assert result.returncode == 0
+        atcha_dir = tmp_path / ".atcha"
+
+        # Delete space.json to simulate pre-federation space
+        space_file = atcha_dir / "space.json"
+        space_file.unlink()
+        assert not space_file.exists()
+
+        # Create users for sending
+        env = _admin_env(atcha_dir)
+        _ = run_cli("admin", "users", "create", "--name=sender", "--role=Test", env=env, cwd=str(tmp_path))
+        _ = run_cli("admin", "users", "create", "--name=recipient", "--role=Test", env=env, cwd=str(tmp_path))
+
+        # Get sender token
+        result = run_cli("admin", "create-token", "--user=sender", env=env, cwd=str(tmp_path))
+        sender_token = result.stdout.strip()
+
+        # Send a message - this triggers auto-upgrade because cmd_send uses _ensure_space_config
+        sender_env = {"ATCHA_TOKEN": sender_token, "ATCHA_DIR": str(atcha_dir)}
+        result = run_cli("send", "--to", "recipient", "test message", env=sender_env, cwd=str(tmp_path))
+        assert result.returncode == 0
+
+        # space.json should now exist (auto-created by send command)
+        assert space_file.exists()
+        config = json.loads(space_file.read_text())
+        assert config["id"].startswith("spc-")
+
+    def test_backward_compat_no_from_space(self, atcha_dir: Path) -> None:
+        """Messages without from_space are treated as local."""
+        cwd = atcha_dir.parent
+
+        # Create users
+        sender_token = _create_user(atcha_dir, "sender")
+        recipient_token = _create_user(atcha_dir, "recipient")
+
+        # Manually write a message without from_space (simulating old format)
+        recipient_inbox = atcha_dir / "users" / "recipient" / "messages" / "inbox.jsonl"
+        old_msg = {
+            "id": "msg-old12345",
+            "thread_id": "msg-old12345",
+            "from": "sender",
+            "to": ["recipient"],
+            "ts": "2026-01-01T00:00:00Z",
+            "type": "message",
+            "content": "Old format message",
+        }
+        with open(recipient_inbox, "a") as f:
+            f.write(json.dumps(old_msg) + "\n")
+
+        # Read message by ID - should work without errors
+        recipient_env = {"ATCHA_TOKEN": recipient_token, "ATCHA_DIR": str(atcha_dir)}
+        result = run_cli("messages", "read", "msg-old12345", env=recipient_env, cwd=str(cwd))
+        assert result.returncode == 0
+        # Output from "messages read" formats from as a string, not dict
+        # Should not have @space suffix (local message)
+        msg = json.loads(result.stdout.strip())
+        assert msg["from"] == "sender"
+        assert "@" not in msg["from"]

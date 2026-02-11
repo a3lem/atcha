@@ -30,7 +30,7 @@ Note: `contacts` has no `list` subcommand - just use `atcha contacts` to list al
 ```bash
 atcha send --to <recipient> "<message>"
 atcha send --to <recipient1> --to <recipient2> "<message>"  # Multiple recipients
-atcha send --all "<message>"                                 # Broadcast to all
+atcha send --broadcast "<message>"                            # Broadcast to all
 ```
 Example: `atcha send --to alex-frontend "API is ready for integration"`
 
@@ -83,47 +83,48 @@ atcha contacts alex-frontend --full  # Include dates
 atcha init --password <password>
 export ATCHA_ADMIN_PASS=<password>
 
-# Create users (--name can be short name or full id)
+# Create users
 atcha admin users add --name anna --role "CLI Specialist"
-# Auto-generates id: anna-cli-specialist
+# Auto-generates id: usr-XXXXX (random)
 
 atcha admin users add --name maya --role "Backend Engineer"
-# Auto-generates id: maya-backend-engineer
+# Auto-generates id: usr-XXXXX (random)
 
 # Generate tokens for users
-atcha create-token --user anna
-atcha create-token --user maya
+atcha admin create-token --user anna
+atcha admin create-token --user maya
 ```
 
 ### Admin commands reference
 
 ```bash
 # List all users
-atcha admin users list
-atcha admin users list --names-only
+atcha contacts --include-self  # Uses admin auth (--password or $ATCHA_ADMIN_PASS)
 
 # Add a new user
 atcha admin users add --name <short-name> --role "<Role>" [--tags=tag1,tag2] [--about="..."]
 
 # Create user token
-atcha create-token --user <name-or-id>
+atcha admin create-token --user <name-or-id>
 
 # Change admin password
-atcha admin password --old <old> --new <new>
+atcha admin password --password <old> --new <new>
 ```
 
 ### Check initialization status
 ```bash
 # Check if atcha is initialized (useful in hooks)
-atcha init --check
+atcha admin status
 # Exits with 0 if initialized, 1 if not. Prints "Atcha initialized" on success.
+# Use -q/--quiet to suppress output (exit code only)
+atcha admin status -q
 ```
 
-### User naming convention
-User ids are auto-generated from short name + role:
-- Input: `--name anna --role "CLI Specialist"` → id: `anna-cli-specialist`, name: `anna`
-- Input: `--name maya --role "Backend Engineer"` → id: `maya-backend-engineer`, name: `maya`
-- Can also provide full id: `--name kai-devops-lead --role "DevOps"` → uses `kai-devops-lead`
+### User ID format
+User IDs are randomly generated with the `usr-` prefix:
+- `usr-a3k9m`, `usr-7x2pq`, `usr-3n8qr`
+- IDs are immutable and auto-assigned on user creation
+- Users are referenced by name in commands (e.g., `anna`, `maya`)
 
 ### Troubleshooting
 
@@ -132,13 +133,13 @@ User ids are auto-generated from short name + role:
 FIX: Set $ATCHA_TOKEN or use --token <token>
 ```
 
-**"Agent not found"**
+**"User not found"**
 ```bash
 atcha contacts --names-only  # See available users
 ```
 
 **"Invalid token"**
-Ask admin to regenerate: `atcha create-token --user <name>`
+Ask admin to regenerate: `atcha admin create-token --user <name>`
 
 ---
 
@@ -153,6 +154,8 @@ Ask admin to regenerate: `atcha create-token --user <name>`
 | `messages list` | JSON array | `[{"from":"bob","ts":"...","preview":"Hello..."}]` |
 | `messages read` | JSONL | `{"from":"bob","ts":"...","content":"..."}` |
 | `send` | JSON | `{"status":"delivered","to":["bob"]}` |
+
+Most commands support `--json` for machine-parsable output (e.g., `whoami --json` → `{"name":"alice"}`, `messages check --json` → `{"count":2,"senders":{"bob":2}}`).
 
 ## Tips
 

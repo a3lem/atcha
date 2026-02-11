@@ -24,10 +24,10 @@ This installs the `atcha` command in your local bin.
 
 ```bash
 # Initialize (will prompt for admin password)
-atcha init
+atcha admin init
 
 # Or with password directly
-atcha init --password secret123
+atcha admin init --password secret123
 ```
 
 This creates `.atcha/` with the admin config, tokens directory, and users directory.
@@ -43,31 +43,31 @@ export ATCHA_ADMIN_PASS=secret123
 
 ```bash
 # Create a user (requires admin password)
-atcha admin users add --name maya --role "Backend Engineer" --tags=backend,auth
+atcha admin users create --name maya --role "Backend Engineer" --tags=backend,auth
 
 # Create another user
-atcha admin users add --name alex --role "Frontend Dev" --tags=frontend,ui
+atcha admin users create --name alex --role "Frontend Dev" --tags=frontend,ui
 ```
 
 ### 5. Get user token and start using atcha
 
 ```bash
 # Get token for a specific user (give this token only to that user)
-atcha create-token --user maya
+atcha admin create-token --user maya@
 # → a3k9m
 
 # Use the token to authenticate as that user
 export ATCHA_TOKEN=a3k9m
 
 # Send a message
-atcha send --to alex "Auth API is ready for integration"
+atcha send --to alex@ "Auth API is ready for integration"
 
 # Check inbox
 atcha messages check
 # → 1 unread message from alex
 
 # Read messages (marks as read)
-atcha messages read
+atcha messages read msg-xxxxx
 # → {"from":"alex","ts":"...","type":"message","content":"Thanks, will integrate today"}
 ```
 
@@ -79,13 +79,13 @@ Install the Claude Code skill from `extras/claude-plugin/skills/atcha/` to use a
 
 ### Running as a user
 
-Launch Claude Code with a user token to give the agent a specific identity. The agent can send and receive messages but cannot create users or impersonate others.
+Launch Claude Code with a user token to give the agent a specific identity. The agent can send and receive messages but cannot create users or act as others.
 
 ```bash
-ATCHA_TOKEN=$(atcha create-token --user bashir --password test) claude
+ATCHA_TOKEN=$(atcha admin create-token --user bashir@ --password test) claude
 ```
 
-The agent never knows the admin password and cannot impersonate other users.
+The agent never knows the admin password and cannot act as other users.
 
 ### Running as an admin
 
@@ -108,47 +108,93 @@ The agent will create the users with appropriate names, roles, and descriptions.
 
 ## CLI Reference
 
-### Setup commands (require admin password)
+### Command tree
+
+```
+atcha
+├── contacts [--include-self] [--tags=x] [--full]
+│   └── show <id-or-address> [--full]
+├── messages [--from=address] [--since=date] [--limit=N] [--include-read] [--no-preview]
+│   ├── check
+│   └── read <msg-id> [msg-id...] [--no-mark]
+├── send --to <address> / --broadcast "content"
+├── profile
+│   └── update [--status] [--about] [--tags]
+├── whoami [--id] [--name]
+├── status [--quiet]
+├── admin
+│   ├── init [--password <pw>]
+│   ├── create-token --user <address>
+│   ├── password --new <pw>
+│   ├── envs
+│   ├── users
+│   │   ├── create --name <n> --role <r> [--status] [--about] [--tags]
+│   │   ├── update <address> [--name] [--role] [--status] [--about] [--tags]
+│   │   └── delete <address>
+│   └── spaces
+│       ├── update [--name] [--description]
+│       ├── add <dir>
+│       └── drop <id>
+```
+
+Bare plural = list. Subcommands = other verbs on that collection.
+
+### Admin commands (require admin password)
 
 ```bash
-# Initialize system (prompts for password if not provided)
-atcha init
-atcha init --password <password>
+# Initialize system
+atcha admin init --password <password>
 
-# Check if initialized (useful in hooks)
-atcha init --check  # exits 0 if initialized, 1 if not
+# Check initialization status
+atcha admin status
 
 # Change password
-atcha admin password --old <old> --new <new>
+atcha admin password --new <new>
 
 # Create user token
-atcha create-token --user <user-name>
+atcha admin create-token --user <address>
 
-# Create user (requires ATCHA_ADMIN_PASS or --password)
-atcha admin users add --name <short-name> --role <role> [--status=...] [--tags=...] [--about=...]
+# Manage users
+atcha admin users                              # list all users
+atcha admin users create --name maya --role "Backend Engineer"
+atcha admin users update maya@ --role "Lead Engineer"
+atcha admin users delete maya@
+
+# Manage spaces
+atcha admin spaces                             # list all (local + federated)
+atcha admin spaces update --name "engineering"
+atcha admin spaces add /path/to/other/.atcha   # federate
+atcha admin spaces drop spc-xxxxx              # defederate
 ```
 
 ### User commands (require token in $ATCHA_TOKEN)
 
 ```bash
-# List all users
+# List contacts
 atcha contacts
 
-# View profiles
-atcha whoami               # Print your username
-atcha contacts $(atcha whoami)  # Your full profile
-atcha contacts <user-name> # Someone else's profile
+# View a contact
+atcha contacts show maya@
 
-# Update profile
+# View your own profile
+atcha profile
+
+# Update profile (self-service: status, about, tags)
 atcha profile update --status="Working on auth" --tags=backend,api
 
+# Check identity
+atcha whoami                  # address (maya@)
+atcha whoami --id             # user ID (usr-xxxxx)
+atcha whoami --name           # bare name (maya)
+
 # Check inbox
-atcha messages check          # Summary (count + senders)
-atcha messages list           # JSON array with previews (no side effects)
-atcha messages read           # Full messages as JSONL, marks as read
+atcha messages check          # digest (count + senders)
+atcha messages                # list messages with previews
+atcha messages read msg-xxxxx # read + mark as read
 
 # Send message
-atcha send --to <recipient> "<message>"
+atcha send --to alex@ "API is ready"
+atcha send --broadcast "Team standup in 5 min"
 ```
 
 ## Directory structure
@@ -172,20 +218,17 @@ atcha send --to <recipient> "<message>"
 
 ## User identifiers
 
-Each user has a **name** (short, unique identifier like `maya`) and an **id** (random alphanumeric sequence). The id is auto-generated when the user is created.
+Each user has three ways to be referenced:
+- **id**: `usr-2fg4` — immutable, globally unique
+- **name**: `maya` — unique within a space, human-readable
+- **address**: `maya@` (local) or `maya@engineering` (cross-space)
 
-Both name and id can be used in commands:
+Commands require an address or ID — bare names are rejected:
 ```bash
-atcha contacts maya        # by name (preferred)
-atcha contacts usr-7x3km   # by id
-atcha send --to maya "Hello"
+atcha contacts show maya@           # by address
+atcha contacts show usr-2fg4        # by id
+atcha send --to maya@ "Hello"
 ```
-
-Examples:
-- Name: `maya`, ID: `a3k9m`
-- Name: `alex`, ID: `7x2pq`
-
-The name must be unique across all users. The id is randomly generated and immutable.
 
 ## Multi-worktree setup
 

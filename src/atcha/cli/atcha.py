@@ -7,6 +7,7 @@ This CLI provides a hierarchical command structure with token-based authenticati
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import getpass
 import hashlib
 import hmac
@@ -28,6 +29,7 @@ from pathlib import Path
 VERSION = "0.1.0"
 ATCHA_DIR_NAME: T.Final[str] = ".atcha"
 TOKEN_LENGTH: T.Final[int] = 5  # 5-char random token
+USER_ID_PREFIX: T.Final[str] = "usr-"
 
 
 # ---------------------------------------------------------------------------
@@ -45,8 +47,8 @@ class AdminConfig(T.TypedDict):
 class UserProfile(T.TypedDict):
     """User profile stored in profile.json.
 
-    - id: Full identifier (e.g., 'maya-backend-engineer'), matches directory name
-    - name: Short name (e.g., 'maya'), first component of id, always unique
+    - id: Unique identifier (e.g., 'usr-a3k9m'), immutable
+    - name: Short name (e.g., 'maya'), matches directory name, always unique
     - last_seen: Last activity timestamp (updated on send/read)
     """
 
@@ -68,7 +70,60 @@ class MessagesState(T.TypedDict, total=False):
 
 
 # Message type - using dict to avoid TypedDict complexity with reserved keywords
-Message = dict[str, T.Any]  # Fields: id, thread_id, reply_to (optional), from, to, ts, type, content
+Message = dict[str, T.Any]  # Fields: id, thread_id, reply_to (optional), from, from_space (optional), to, to_space (optional), ts, type, content
+
+
+class SpaceConfig(T.TypedDict):
+    """Space identity stored in space.json.
+
+    - id: Unique immutable identifier (format: spc-{5-char})
+    - name: Human-readable name, mutable, derived from directory at init
+    - created: ISO timestamp of space creation
+    """
+
+    id: str
+    name: str
+    created: str
+
+
+# Space ID prefix for disambiguation from user IDs
+SPACE_ID_PREFIX: T.Final[str] = "spc-"
+
+
+class FederatedSpace(T.TypedDict):
+    """Entry in federation.local.json.
+
+    - id: Space ID (copied from remote space.json at registration)
+    - name: Space name (copied from remote space.json, updated on access)
+    - path: Absolute path to the remote .atcha/ directory
+    - added: ISO timestamp of when this space was registered
+    """
+
+    id: str
+    name: str
+    path: str
+    added: str
+
+
+class FederationConfig(T.TypedDict):
+    """Federation registry stored in federation.local.json."""
+
+    spaces: list[FederatedSpace]
+
+
+# ---------------------------------------------------------------------------
+# Auth context — replaces global mutable state for CLI auth
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class AuthContext:
+    """Immutable auth context built once from parsed CLI args and env vars."""
+
+    token: str | None
+    password: str | None
+    as_user: str | None  # --as-user <user-id>: act as this user (admin only, user commands only)
+    json_output: bool  # whether --json was passed
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +142,7 @@ def _error(msg: str, fix: str | None = None, available: list[str] | None = None)
 
 
 # ---------------------------------------------------------------------------
-# Directory structure helpers (Task 1.1)
+# Directory structure helpers
 # ---------------------------------------------------------------------------
 
 
@@ -119,7 +174,7 @@ def _require_atcha_dir() -> Path:
     if atcha_dir is None:
         _error(
             ".atcha directory not found",
-            fix="Run 'atcha init' to initialize",
+            fix="Run 'atcha admin init' to initialize",
         )
     assert atcha_dir is not None
     return atcha_dir
@@ -168,14 +223,14 @@ def _extract_name(user_id: str) -> str:
 
 
 def _resolve_user(atcha_dir: Path, identifier: str) -> str | None:
-    """Resolve an identifier (id or name) to the full user id.
+    """Resolve an identifier (user ID, directory name, or short name) to the directory name.
 
     Args:
         atcha_dir: Path to .atcha directory
-        identifier: Either a full id ('maya-backend-engineer') or short name ('maya')
+        identifier: A user ID ('usr-a3k9m'), directory name ('maya'), or short name
 
     Returns:
-        The full user id if found, None otherwise.
+        The directory name (username) if found, None otherwise.
 
     Raises:
         SystemExit if the short name matches multiple users (ambiguous).
@@ -184,9 +239,22 @@ def _resolve_user(atcha_dir: Path, identifier: str) -> str | None:
     if not users_dir.exists():
         return None
 
-    # First, try exact match on id (directory name)
+    # Try exact match on directory name (username)
     if (users_dir / identifier).is_dir():
         return identifier
+
+    # If identifier is a user ID (usr-xxx), scan profiles to find the matching user
+    if identifier.startswith(USER_ID_PREFIX):
+        for user_dir in users_dir.iterdir():
+            if not user_dir.is_dir():
+                continue
+            profile_path = user_dir / "profile.json"
+            if profile_path.exists():
+                profile = json.loads(profile_path.read_text())
+                profile_id = profile.get("id")
+                if profile_id is not None and profile_id == identifier:
+                    return user_dir.name
+        return None
 
     # Otherwise, try to match on name (first component)
     matches: list[str] = []
@@ -207,30 +275,20 @@ def _resolve_user(atcha_dir: Path, identifier: str) -> str | None:
     return None
 
 
-def _is_name_unique(atcha_dir: Path, name: str, exclude_id: str | None = None) -> bool:
-    """Check if a short name is unique among all users.
+def _validate_address_format(value: str) -> str:
+    """Validate that a user reference is an address (name@, name@space) or user ID, not a bare name.
 
-    Args:
-        atcha_dir: Path to .atcha directory
-        name: The short name to check
-        exclude_id: Optional user id to exclude from the check (for updates)
-
-    Returns:
-        True if the name is unique, False otherwise.
+    Bare names are rejected because they're ambiguous -- could be local or cross-space.
+    Returns the value unchanged if valid. Calls _error() if bare name.
     """
-    users_dir = _get_users_dir(atcha_dir)
-    if not users_dir.exists():
-        return True
-
-    for user_dir in users_dir.iterdir():
-        if user_dir.is_dir():
-            user_id = user_dir.name
-            if exclude_id and user_id == exclude_id:
-                continue
-            if _extract_name(user_id) == name:
-                return False
-
-    return True
+    if value.startswith(USER_ID_PREFIX):
+        return value  # usr-xxxxx is always valid
+    if "@" in value:
+        return value  # name@ or name@space
+    _error(
+        f"bare name '{value}' is ambiguous",
+        fix=f"use '{value}@' for local or '{value}@<space>' for cross-space",
+    )
 
 
 def _find_duplicate_names(atcha_dir: Path) -> dict[str, list[str]]:
@@ -276,7 +334,7 @@ def _ensure_user_dir(atcha_dir: Path, user_id: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Password hashing utilities (Task 1.2)
+# Password hashing utilities
 # ---------------------------------------------------------------------------
 
 
@@ -297,7 +355,7 @@ def _verify_password(password: str, stored_hash: str, salt: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Token management utilities (Task 1.3)
+# Token management utilities
 # ---------------------------------------------------------------------------
 
 # Alphabet for token encoding (no ambiguous chars like 0/O, 1/l)
@@ -305,22 +363,30 @@ TOKEN_ALPHABET: T.Final[str] = "23456789abcdefghjkmnpqrstuvwxyz"
 
 
 def _generate_user_id() -> str:
-    """Generate a random user ID.
+    """Generate a random user ID with usr- prefix.
 
     Uses the same alphabet as tokens (no ambiguous chars).
-    Returns a 5-character random string for use as immutable user identifier.
+    Returns a string like 'usr-a3k9m' for use as immutable user identifier.
     """
-    result = []
-    for _ in range(TOKEN_LENGTH):
-        result.append(secrets.choice(TOKEN_ALPHABET))
-    return "".join(result)
+    chars = "".join(secrets.choice(TOKEN_ALPHABET) for _ in range(TOKEN_LENGTH))
+    return f"{USER_ID_PREFIX}{chars}"
+
+
+def _generate_space_id() -> str:
+    """Generate a random space ID with spc- prefix.
+
+    Uses the same alphabet as user IDs (no ambiguous chars).
+    Format: spc-{5-char}, e.g., spc-a3k9m
+    """
+    chars = "".join(secrets.choice(TOKEN_ALPHABET) for _ in range(TOKEN_LENGTH))
+    return f"{SPACE_ID_PREFIX}{chars}"
 
 
 def _derive_token(password: str, user_name: str, salt: str) -> str:
-    """Derive a deterministic token from admin password and agent name.
+    """Derive a deterministic token from admin password and user name.
 
     Uses HMAC-SHA256 with the password as key, then encodes to TOKEN_LENGTH chars.
-    Same password + agent + salt always produces the same token.
+    Same password + user + salt always produces the same token.
     """
     key = password.encode()
     message = f"token:{user_name}:{salt}".encode()
@@ -379,31 +445,22 @@ def _validate_token(atcha_dir: Path, token: str) -> tuple[str, bool] | None:
 
 
 # ---------------------------------------------------------------------------
-# Auth context helpers (Task 1.4)
+# Auth context helpers
 # ---------------------------------------------------------------------------
 
 
-def _get_token_from_env() -> str | None:
-    """Get token from $ATCHA_TOKEN environment variable."""
+def _get_token(auth: AuthContext) -> str | None:
+    """Get token from AuthContext or env var ($ATCHA_TOKEN)."""
+    if auth.token:
+        return auth.token
     return os.environ.get("ATCHA_TOKEN")
 
 
-# Global to hold --token from CLI (set during arg parsing)
-_cli_token: str | None = None
-
-
-def _get_token() -> str | None:
-    """Get token from CLI option (--token) or env var ($ATCHA_TOKEN)."""
-    if _cli_token:
-        return _cli_token
-    return _get_token_from_env()
-
-
-# Global to hold --password from CLI (set during arg parsing)
-_cli_password: str | None = None
-
-# Global to hold --user from CLI (for admin impersonation)
-_cli_user: str | None = None
+def _get_password(auth: AuthContext) -> str | None:
+    """Get password from AuthContext or env var ($ATCHA_ADMIN_PASS)."""
+    if auth.password:
+        return auth.password
+    return os.environ.get("ATCHA_ADMIN_PASS")
 
 
 def _get_password_from_env() -> str | None:
@@ -411,31 +468,24 @@ def _get_password_from_env() -> str | None:
     return os.environ.get("ATCHA_ADMIN_PASS")
 
 
-def _get_password() -> str | None:
-    """Get password from CLI option (--password) or env var ($ATCHA_ADMIN_PASS)."""
-    if _cli_password:
-        return _cli_password
-    return _get_password_from_env()
-
-
-def _require_auth() -> tuple[Path, str, bool]:
-    """Validate auth from CLI or env, return (atcha_dir, user, is_admin). Exits on error.
+def _require_auth(auth: AuthContext) -> tuple[Path, str, bool]:
+    """Validate auth from AuthContext or env, return (atcha_dir, user, is_admin). Exits on error.
 
     Priority: --password/ATCHA_ADMIN_PASS > --token/ATCHA_TOKEN
     """
     atcha_dir = _require_atcha_dir()
 
     # Check password first (admin auth)
-    password = _get_password()
+    password = _get_password(auth)
     if password:
         _require_admin(atcha_dir, password)
         return atcha_dir, "_admin", True
 
     # Then check token (user auth)
-    token = _get_token()
+    token = _get_token(auth)
     if not token:
         _error(
-            "No token provided",
+            "Cannot identify user — no token provided",
             fix="Use --token <token> or set ATCHA_TOKEN env var",
         )
 
@@ -455,7 +505,7 @@ def _require_admin(atcha_dir: Path, password: str) -> None:
     if not admin_file.exists():
         _error(
             "Admin not initialized",
-            fix="Run 'atcha init' first",
+            fix="Run 'atcha admin init' first",
         )
 
     admin_config = T.cast(AdminConfig, json.loads(admin_file.read_text()))
@@ -463,43 +513,49 @@ def _require_admin(atcha_dir: Path, password: str) -> None:
         _error("Invalid password")
 
 
-def _require_user() -> tuple[Path, str]:
+def _require_user(auth: AuthContext) -> tuple[Path, str]:
     """Validate user token from env, return (atcha_dir, user_name). Exits on error.
 
-    Supports admin impersonation via --user when authenticated as admin.
+    Supports --as-user for admin to act as a specific user.
     """
-    atcha_dir, user_name, is_admin = _require_auth()
+    atcha_dir, user_name, is_admin = _require_auth(auth)
 
     if is_admin:
-        # Admin can impersonate users with --user
-        if _cli_user:
-            # Resolve and verify the target agent exists
-            user_id = _resolve_user(atcha_dir, _cli_user)
+        # Admin can act as another user with --as-user
+        if auth.as_user:
+            # --as-user requires a user ID (usr-xxx), not an address
+            if not auth.as_user.startswith(USER_ID_PREFIX):
+                _error(
+                    "--as-user requires a user ID (usr-xxx), not an address",
+                    fix="use the user ID, e.g. --as-user usr-xxxxx",
+                )
+            # Resolve and verify the target user exists
+            user_id = _resolve_user(atcha_dir, auth.as_user)
             if user_id is None:
                 users = list(_iter_user_names(atcha_dir))
                 _error(
-                    f"Agent '{_cli_user}' not found",
+                    f"User '{auth.as_user}' not found",
                     available=users if users else None,
                 )
             assert user_id is not None
             return atcha_dir, user_id
 
-        # Admin without --user cannot use agent commands
-        if _cli_password:
+        # Admin without --as-user cannot use user commands
+        if auth.password:
             _error(
                 "--password authenticates as admin, not as a user",
-                fix="Use --user <id-or-name> to act on behalf of a user, or use a user token",
+                fix="Use --as-user <user-id> to act as a user, or use a user token",
             )
         _error(
             "Admin token cannot be used for user operations",
-            fix="Use --user <id-or-name> to act on behalf of a user, or use a user token",
+            fix="Use --as-user <user-id> to act as a user, or use a user token",
         )
 
-    # Non-admin with --user is an error
-    if _cli_user:
+    # Non-admin with --as-user is an error
+    if auth.as_user:
         _error(
-            "--user requires admin authentication",
-            fix="Use --password or admin --token with --user",
+            "--as-user requires admin authentication",
+            fix="Use --password with --as-user",
         )
 
     return atcha_dir, user_name
@@ -536,37 +592,28 @@ def _validate_username(name: str) -> tuple[bool, str]:
     return True, ""
 
 
-def _slugify_role(role: str) -> str:
-    """Convert a role string to a slug suitable for user ids.
+def _slugify_name(name: str) -> str:
+    """Convert a directory name to a valid space handle.
+
+    Handle format: [a-z0-9][a-z0-9-]{0,38}[a-z0-9] (2-40 chars, no leading/trailing dashes)
 
     Examples:
-        'CLI Specialist' -> 'cli-specialist'
-        'Backend Engineer' -> 'backend-engineer'
+        'my-project' -> 'my-project'
+        'My Project' -> 'my-project'
+        'agent_team_mail' -> 'agent-team-mail'
     """
-    # Convert to lowercase, replace spaces with dashes, remove non-alphanumeric except dashes
-    slug = role.lower().strip()
-    slug = re.sub(r'\s+', '-', slug)  # Replace spaces with dashes
+    slug = name.lower().strip()
+    slug = re.sub(r'[\s_]+', '-', slug)  # Replace spaces/underscores with dashes
     slug = re.sub(r'[^a-z0-9-]', '', slug)  # Remove non-alphanumeric except dashes
     slug = re.sub(r'-+', '-', slug)  # Collapse multiple dashes
     slug = slug.strip('-')  # Remove leading/trailing dashes
+    # Ensure minimum length
+    if len(slug) < 2:
+        slug = "space"
+    # Truncate to max 40 chars
+    if len(slug) > 40:
+        slug = slug[:40].rstrip('-')
     return slug
-
-
-def _build_user_id(name: str, role: str) -> str:
-    """Build a full user id from a short name and role.
-
-    Args:
-        name: Short name (e.g., 'anna')
-        role: Role description (e.g., 'CLI Specialist')
-
-    Returns:
-        Full user id (e.g., 'anna-cli-specialist')
-    """
-    role_slug = _slugify_role(role)
-    if role_slug:
-        return f"{name}-{role_slug}"
-    else:
-        return name
 
 
 # ---------------------------------------------------------------------------
@@ -664,21 +711,317 @@ def _save_profile(user_dir: Path, profile: UserProfile) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Admin commands (Tasks 2.1-2.4)
+# Space identity helpers (Federation)
 # ---------------------------------------------------------------------------
 
 
-def cmd_init(args: argparse.Namespace) -> None:
-    """Initialize workspace (first-time setup)."""
-    # Handle --check mode
-    if getattr(args, "check", False):
-        existing_dir = _get_atcha_dir()
-        if existing_dir is not None and (existing_dir / "admin.json").exists():
-            print("Atcha initialized")
-            sys.exit(0)
-        else:
-            sys.exit(1)
+def _load_space_config(atcha_dir: Path) -> SpaceConfig | None:
+    """Load space.json if it exists."""
+    space_file = atcha_dir / "space.json"
+    if not space_file.exists():
+        return None
+    try:
+        return T.cast(SpaceConfig, json.loads(space_file.read_text()))
+    except (json.JSONDecodeError, OSError):
+        return None
 
+
+def _save_space_config(atcha_dir: Path, config: SpaceConfig) -> None:
+    """Save space.json."""
+    space_file = atcha_dir / "space.json"
+    _ = space_file.write_text(json.dumps(config, indent=2) + "\n")
+
+
+def _ensure_space_config(atcha_dir: Path) -> SpaceConfig:
+    """Load or auto-create space.json for backward compatibility.
+
+    For existing spaces without space.json (pre-federation), this auto-generates
+    a space ID and derives a handle from the parent directory name.
+    """
+    config = _load_space_config(atcha_dir)
+    if config is not None:
+        # Validate space ID format
+        space_id = config.get("id", "")
+        if not space_id.startswith(SPACE_ID_PREFIX) or len(space_id) != len(SPACE_ID_PREFIX) + TOKEN_LENGTH:
+            _error("corrupt space identity", fix="Regenerate space.json or restore from backup")
+        return config
+
+    # Auto-create for existing spaces (backward compatibility)
+    space_name = _slugify_name(atcha_dir.parent.name)
+    config = SpaceConfig(
+        id=_generate_space_id(),
+        name=space_name,
+        created=_now_iso(),
+    )
+    _save_space_config(atcha_dir, config)
+    return config
+
+
+# ---------------------------------------------------------------------------
+# Federation registry helpers
+# ---------------------------------------------------------------------------
+
+
+def _load_federation(atcha_dir: Path) -> FederationConfig:
+    """Load federation.local.json, returns empty config if not exists."""
+    federation_file = atcha_dir / "federation.local.json"
+    if not federation_file.exists():
+        return FederationConfig(spaces=[])
+    try:
+        data = json.loads(federation_file.read_text())
+        return T.cast(FederationConfig, data)
+    except (json.JSONDecodeError, OSError):
+        return FederationConfig(spaces=[])
+
+
+def _save_federation(atcha_dir: Path, config: FederationConfig) -> None:
+    """Save federation.local.json."""
+    federation_file = atcha_dir / "federation.local.json"
+    _ = federation_file.write_text(json.dumps(config, indent=2) + "\n")
+
+
+def _is_space_available(space: FederatedSpace) -> bool:
+    """Check if federated space path is accessible."""
+    return Path(space["path"]).is_dir()
+
+
+def _find_space(federation: FederationConfig, identifier: str) -> FederatedSpace | None:
+    """Find space by handle or ID in federation config."""
+    for space in federation["spaces"]:
+        if space["name"] == identifier or space["id"] == identifier:
+            return space
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Cross-space address resolution (Federation)
+# ---------------------------------------------------------------------------
+
+
+def _parse_address(address: str) -> tuple[str, str | None]:
+    """Parse 'name' or 'name@space' into (name, space_ref).
+
+    Returns (name, None) for local addresses.
+    Returns (name, space_ref) for cross-space addresses.
+    """
+    if "@" in address:
+        name, space_ref = address.rsplit("@", 1)
+        return name, space_ref
+    return address, None
+
+
+def _resolve_space(
+    atcha_dir: Path, identifier: str
+) -> tuple[Path, SpaceConfig] | None:
+    """Resolve space handle or ID to (atcha_dir, space_config).
+
+    Checks local space first, then federation.local.json.
+    Returns None if not found or unavailable.
+    """
+    # Check local space first
+    local_config = _load_space_config(atcha_dir)
+    if local_config and (local_config["name"] == identifier or local_config["id"] == identifier):
+        return atcha_dir, local_config
+
+    # Check federated spaces
+    federation = _load_federation(atcha_dir)
+    federated = _find_space(federation, identifier)
+    if federated:
+        federated_path = Path(federated["path"])
+        if federated_path.is_dir():
+            federated_config = _load_space_config(federated_path)
+            if federated_config:
+                return federated_path, federated_config
+    return None
+
+
+def _resolve_user_cross_space(
+    local_atcha_dir: Path, address: str
+) -> tuple[str, Path, SpaceConfig] | None:
+    """Resolve potentially cross-space address to (user_id, target_atcha_dir, space_config).
+
+    For local addresses: resolves in local space, then checks federated spaces for ambiguity.
+    For qualified addresses (name@space): resolves directly in specified space.
+
+    Returns None if user not found. Exits with error if ambiguous.
+    """
+    name, space_ref = _parse_address(address)
+
+    if space_ref:
+        # Qualified address: name@space
+        resolved = _resolve_space(local_atcha_dir, space_ref)
+        if resolved is None:
+            _error(
+                f"unknown space: {space_ref}",
+                fix="Check available spaces with 'atcha admin federated list'",
+            )
+        target_dir, space_config = resolved
+        user_id = _resolve_user(target_dir, name)
+        if user_id is None:
+            _error(f"user not found: {name} in {space_config['name']}")
+        return user_id, target_dir, space_config
+
+    # Bare address: check local first, then federated
+    local_config = _ensure_space_config(local_atcha_dir)
+    local_user = _resolve_user(local_atcha_dir, name)
+
+    # Check federated spaces for matches
+    federation = _load_federation(local_atcha_dir)
+    federated_matches: list[tuple[str, Path, SpaceConfig]] = []
+
+    for space in federation["spaces"]:
+        space_path = Path(space["path"])
+        if not space_path.is_dir():
+            continue
+        space_config = _load_space_config(space_path)
+        if not space_config:
+            continue
+        user_id = _resolve_user(space_path, name)
+        if user_id:
+            federated_matches.append((user_id, space_path, space_config))
+
+    if local_user and not federated_matches:
+        return local_user, local_atcha_dir, local_config
+    elif federated_matches and not local_user:
+        if len(federated_matches) == 1:
+            return federated_matches[0]
+        else:
+            spaces = [m[2]["name"] for m in federated_matches]
+            _error(
+                f"ambiguous recipient: {name} exists in {', '.join(spaces)}",
+                fix=f"Use {name}@<space> to specify",
+            )
+    elif local_user and federated_matches:
+        all_spaces = [local_config["name"]] + [m[2]["name"] for m in federated_matches]
+        _error(
+            f"ambiguous recipient: {name} exists in {', '.join(all_spaces)}",
+            fix=f"Use {name}@<space> to specify",
+        )
+
+    return None
+
+
+def _find_space_by_id(federation: FederationConfig, space_id: str) -> FederatedSpace | None:
+    """Find a federated space by its ID."""
+    for space in federation["spaces"]:
+        if space["id"] == space_id:
+            return space
+    return None
+
+
+def _get_sender_name(msg: Message) -> str:
+    """Extract sender name from message (handles both old and new formats)."""
+    from_field = msg["from"]
+    if isinstance(from_field, dict):
+        return from_field["name"]
+    return from_field
+
+
+def _get_sender_space(msg: Message) -> str | None:
+    """Extract sender space name from message (handles both old and new formats).
+
+    Returns None if the message has no space info (local-only or old format).
+    """
+    from_field = msg["from"]
+    if isinstance(from_field, dict):
+        space_info = from_field.get("space")
+        if space_info:
+            return space_info.get("name")
+    return None
+
+
+def _match_sender_address(msg: Message, from_filter: str) -> bool:
+    """Check if a message's sender matches an address filter.
+
+    - 'name' (no @) -> matches any sender with that name (backward compatible)
+    - 'name@space' -> matches only that name in that space
+    - 'name@' (empty space) -> matches only that name when sender has no space info (local)
+    """
+    filter_name, filter_space = _parse_address(from_filter)
+    sender_name = _get_sender_name(msg)
+
+    if sender_name != filter_name:
+        return False
+
+    if filter_space is None:
+        # Bare name: match any sender with that name
+        return True
+
+    # Qualified: match on space
+    sender_space = _get_sender_space(msg)
+    if filter_space == "":
+        # name@ -> match only local (no space info)
+        return sender_space is None
+    return sender_space == filter_space
+
+
+def _format_sender(
+    msg: Message, local_space_id: str, federation: FederationConfig
+) -> tuple[str, str | None]:
+    """Format sender for display, adding @space suffix if cross-space.
+
+    Returns (formatted_sender, warning) where warning is set if from_space is unknown.
+    """
+    from_field = msg["from"]
+
+    # New format: from is a structured object
+    if isinstance(from_field, dict):
+        sender_name = from_field["name"]
+        space_info = from_field.get("space")
+
+        # No space info or local space: just show name
+        if space_info is None or space_info.get("id") == local_space_id:
+            return sender_name, None
+
+        # Cross-space: show name@space_name
+        space_name = space_info.get("name")
+        if space_name:
+            return f"{sender_name}@{space_name}", None
+
+        # Fallback: use space ID if name not available
+        space_id = space_info.get("id", "unknown")
+        return f"{sender_name}@{space_id}", f"unknown space: {space_id}"
+
+    # Old format: from is a string
+    sender = from_field
+    from_space = msg.get("from_space")
+
+    # No from_space or local space: just show name
+    if from_space is None or from_space == local_space_id:
+        return sender, None
+
+    # Look up space name in federation by ID
+    space = _find_space_by_id(federation, from_space)
+    if space:
+        return f"{sender}@{space['name']}", None
+    else:
+        # Unknown space: show raw ID and return warning
+        warning = f"unknown space: {from_space}"
+        return f"{sender}@{from_space}", warning
+
+
+# ---------------------------------------------------------------------------
+# Admin commands
+# ---------------------------------------------------------------------------
+
+
+def cmd_status(auth: AuthContext) -> None:
+    """Check if atcha is initialized."""
+    existing_dir = _get_atcha_dir()
+    if existing_dir is not None and (existing_dir / "admin.json").exists():
+        if auth.json_output:
+            print(json.dumps({"initialized": True}))
+        else:
+            print("Atcha initialized")
+        sys.exit(0)
+    else:
+        if auth.json_output:
+            print(json.dumps({"initialized": False}))
+        sys.exit(1)
+
+
+def cmd_init(args: argparse.Namespace, auth: AuthContext) -> None:
+    """Initialize workspace (first-time setup)."""
     # Check if already initialized
     existing_dir = _get_atcha_dir()
     if existing_dir is not None:
@@ -719,41 +1062,54 @@ def cmd_init(args: argparse.Namespace) -> None:
     admin_file = atcha_dir / "admin.json"
     _ = admin_file.write_text(json.dumps(admin_config, indent=2) + "\n")
 
-    print(f"Initialized .atcha/ at {atcha_dir}")
+    # Create space.json for federation support
+    space_name = _slugify_name(atcha_dir.parent.name)
+    space_config: SpaceConfig = {
+        "id": _generate_space_id(),
+        "name": space_name,
+        "created": _now_iso(),
+    }
+    _save_space_config(atcha_dir, space_config)
+
+    if auth.json_output:
+        print(json.dumps({"status": "initialized", "path": str(atcha_dir)}))
+    else:
+        print(f"Initialized .atcha/ at {atcha_dir}")
 
 
-def cmd_admin_password(args: argparse.Namespace) -> None:
-    """Change admin password."""
+def cmd_admin_password(auth: AuthContext, args: argparse.Namespace) -> None:
+    """Change admin password. Uses standard auth (--password or env) for old password."""
     atcha_dir = _require_atcha_dir()
 
-    old_password = T.cast(str | None, args.old)
-    new_password = T.cast(str | None, args.new)
+    # Authenticate with current password via standard auth mechanism
+    password = _get_password(auth)
+    if not password:
+        _error("Admin password required", fix="Use --password <password> or set ATCHA_ADMIN_PASS")
+    assert password is not None
+    _require_admin(atcha_dir, password)
 
-    if not old_password:
-        _error("Old password required", fix="Use --old <password>")
+    new_password = T.cast(str | None, args.new)
     if not new_password:
         _error("New password required", fix="Use --new <password>")
-
-    assert old_password is not None
     assert new_password is not None
-
-    # Verify old password
-    _require_admin(atcha_dir, old_password)
 
     # Update password
     salt = _generate_salt()
     password_hash = _hash_password(new_password, salt)
-    admin_config: AdminConfig = {
+    new_admin_config: AdminConfig = {
         "password_hash": password_hash,
         "salt": salt,
     }
     admin_file = atcha_dir / "admin.json"
-    _ = admin_file.write_text(json.dumps(admin_config, indent=2) + "\n")
+    _ = admin_file.write_text(json.dumps(new_admin_config, indent=2) + "\n")
 
-    print("Password updated")
+    if auth.json_output:
+        print(json.dumps({"status": "updated"}))
+    else:
+        print("Password updated")
 
 
-def cmd_admin_hints(args: argparse.Namespace) -> None:
+def cmd_admin_hints(auth: AuthContext) -> None:
     """Print helpful hints and reminders for admins."""
     hints = """# Atcha Admin Hints
 
@@ -762,7 +1118,7 @@ def cmd_admin_hints(args: argparse.Namespace) -> None:
 | Variable | Purpose | Usage |
 |----------|---------|-------|
 | `ATCHA_DIR` | Path to `.atcha/` directory | Auto-discovered if not set. Override for shared setup across worktrees. |
-| `ATCHA_TOKEN` | User authentication token | Set this to authenticate as a specific user. Get token with `atcha create-token`. |
+| `ATCHA_TOKEN` | User authentication token | Set this to authenticate as a specific user. Get token with `atcha admin create-token`. |
 | `ATCHA_ADMIN_PASS` | Admin password | Used for admin operations instead of tokens. Set once, use for all admin commands. |
 
 ## Common Admin Tasks
@@ -770,46 +1126,45 @@ def cmd_admin_hints(args: argparse.Namespace) -> None:
 ### Creating a New User
 ```bash
 export ATCHA_ADMIN_PASS=your-password
-atcha admin users add --name alice-backend --role "Backend Engineer" --tags=backend,auth
+atcha admin users create --name alice --role "Backend Engineer" --tags=backend,auth
 ```
 
 ### Getting a User's Token
 ```bash
-atcha create-token --user alice-backend
+atcha admin create-token --user alice
 # Copy the token and share it with the user (or set in their .env)
 ```
 
 ### Listing All Users
 ```bash
-atcha admin users list              # JSON format
-atcha admin users list --names-only # Just names
+atcha contacts --include-self          # JSON format
+atcha contacts --include-self --names-only # Just names
 ```
 
 ### Updating Another User's Profile
 ```bash
-atcha profile update --name alice-backend --status "On vacation" --password $ATCHA_ADMIN_PASS
+atcha admin users update alice@ --status "On vacation" --password $ATCHA_ADMIN_PASS
 ```
 
 ## Directory Structure
 
 ```
 .atcha/
-├── admin.json              # Admin password hash + salt
-├── tokens/
-│   ├── _admin              # Admin token hash (unused)
-│   └── <user-name>         # User token hashes
-└── users/
-    └── <user-name>/
-        ├── profile.json    # User profile
-        └── mail/
-            ├── inbox.jsonl # Incoming messages
-            ├── sent.jsonl  # Sent messages
-            └── state.json  # Read state
+\u251c\u2500\u2500 admin.json              # Admin password hash + salt
+\u251c\u2500\u2500 tokens/
+\u2502   \u2514\u2500\u2500 <user-name>         # User token hashes
+\u2514\u2500\u2500 users/
+    \u2514\u2500\u2500 <user-name>/
+        \u251c\u2500\u2500 profile.json    # User profile
+        \u2514\u2500\u2500 messages/
+            \u251c\u2500\u2500 inbox.jsonl # Incoming messages
+            \u251c\u2500\u2500 sent.jsonl  # Sent messages
+            \u2514\u2500\u2500 state.json  # Read state
 ```
 
 ## Token Security
 
-- Tokens are **deterministic**: Same password + agent always produces the same token
+- Tokens are **deterministic**: Same password + user always produces the same token
 - Only **hashes** are stored in `.atcha/tokens/`
 - **Never** share your admin password; share individual user tokens instead
 - **Token format**: 5-character alphanumeric (e.g., `a3k9m`)
@@ -831,56 +1186,407 @@ export ATCHA_TOKEN=<bob-token>
 
 | Need to... | Command |
 |------------|---------|
-| Change admin password | `atcha admin password --old <old> --new <new>` |
-| Check initialization | `atcha init --check` |
-| Create user token | `atcha create-token --user <name>` |
+| Change admin password | `atcha admin password --password <old> --new <new>` |
+| Check initialization | `atcha admin status` |
+| Create user token | `atcha admin create-token --user <name>` |
 | View user profile | `atcha contacts <name>` |
-| List all users | `atcha admin users list` |
+| List all users | `atcha contacts --include-self` |
 """
     print(hints)
 
 
-def cmd_admin_users(args: argparse.Namespace) -> None:
-    """Admin users command - list all users or add new users."""
-    users_command = T.cast(str | None, getattr(args, "users_command", None))
 
-    if users_command == "list":
-        # List all users (admin context, so include_self=True by default)
-        list_args = argparse.Namespace()
-        list_args.names_only = T.cast(bool, getattr(args, "names_only", False))
-        list_args.include_self = True  # Admin sees all
-        list_args.tags = T.cast(str | None, getattr(args, "tags", None))
-        list_args.full = T.cast(bool, getattr(args, "full", False))
-        cmd_agents_list(list_args)
-
-    elif users_command == "add":
-        # Delegate to agents_add (requires admin auth via $ATCHA_ADMIN_PASS)
-        # Set password from env for users_add
-        add_args = argparse.Namespace()
-        add_args.name = T.cast(str, args.name)
-        add_args.role = T.cast(str, args.role)
-        add_args.password = _get_password_from_env()
-        add_args.token = None
-        add_args.status = T.cast(str | None, getattr(args, "status", None))
-        add_args.tags = T.cast(str | None, getattr(args, "tags", None))
-        add_args.about = T.cast(str | None, getattr(args, "about", None))
-        cmd_agents_add(add_args)
-
-    else:
-        print("Usage: atcha admin users {list|add}", file=sys.stderr)
-        sys.exit(1)
+def cmd_admin_space_rename(auth: AuthContext, args: argparse.Namespace) -> None:
+    """Rename the current space's name. Legacy entry point -- delegates to cmd_admin_spaces_update."""
+    cmd_admin_spaces_update(auth, args)
 
 
-def cmd_create_token(args: argparse.Namespace) -> None:
+def cmd_admin_spaces_update(auth: AuthContext, args: argparse.Namespace) -> None:
+    """Update the current space's name and/or description."""
+    atcha_dir = _require_atcha_dir()
+
+    # Require admin auth
+    password = _get_password(auth)
+    if not password:
+        _error("Admin password required", fix="Use --password or set ATCHA_ADMIN_PASS")
+    assert password is not None
+    _require_admin(atcha_dir, password)
+
+    new_name = T.cast(str | None, getattr(args, "new_space_name", None))
+    description = T.cast(str | None, getattr(args, "description", None))
+
+    if new_name is None and description is None:
+        _error("Nothing to update", fix="Use --name and/or --description")
+
+    # Load current space config
+    space_config = _ensure_space_config(atcha_dir)
+    result: dict[str, str] = {"id": space_config["id"]}
+
+    if new_name is not None:
+        # Validate name format (same rules as user names)
+        valid, err = _validate_username(new_name)
+        if not valid:
+            _error(f"Invalid name format: {err}")
+
+        old_name = space_config["name"]
+        space_config["name"] = new_name
+        result["old_name"] = old_name
+        result["new_name"] = new_name
+
+    if description is not None:
+        space_config["description"] = description  # type: ignore[typeddict-unknown-key]
+        result["description"] = description
+
+    _save_space_config(atcha_dir, space_config)
+    result["status"] = "updated"
+    print(json.dumps(result, indent=2))
+
+
+
+def cmd_admin_federated_add(auth: AuthContext, args: argparse.Namespace) -> None:
+    """Register a federated space.
+
+    Reads remote space.json, copies id and handle, stores path.
+    Detects handle collisions and requires --force to override.
+    """
+    atcha_dir = _require_atcha_dir()
+
+    # Require admin auth
+    password = _get_password(auth)
+    if not password:
+        _error("Admin password required", fix="Use --password or set ATCHA_ADMIN_PASS")
+    assert password is not None
+    _require_admin(atcha_dir, password)
+
+    path_arg = T.cast(str, args.path)
+    force = T.cast(bool, getattr(args, "force", False))
+
+    # Resolve path: if it's a directory with .atcha/, use that; otherwise assume it IS the .atcha/ dir
+    path = Path(path_arg).resolve()
+    if not path.exists():
+        _error(f"Path does not exist: {path}")
+
+    # Check if path is a parent directory with .atcha/ inside
+    if (path / ATCHA_DIR_NAME).is_dir():
+        path = path / ATCHA_DIR_NAME
+    elif not path.name == ATCHA_DIR_NAME:
+        # Check if this directory contains admin.json (i.e., is an atcha dir)
+        if not (path / "admin.json").exists():
+            _error(
+                f"Not a valid atcha space: {path}",
+                fix=f"Provide path to .atcha/ directory or its parent",
+            )
+
+    # Read remote space.json
+    remote_space_config = _load_space_config(path)
+    if remote_space_config is None:
+        _error(
+            f"Not a valid atcha space: {path}",
+            fix="The remote directory must have a space.json file. Run 'atcha init' there first.",
+        )
+    assert remote_space_config is not None
+
+    remote_id = remote_space_config["id"]
+    remote_name = remote_space_config["name"]
+
+    # Validate space ID format
+    if not remote_id.startswith(SPACE_ID_PREFIX) or len(remote_id) != len(SPACE_ID_PREFIX) + TOKEN_LENGTH:
+        _error(f"Corrupt space identity in {path}", fix="Regenerate space.json in the remote space")
+
+    # Load current federation config
+    federation = _load_federation(atcha_dir)
+
+    # Check if this space ID is already registered
+    existing_by_id = _find_space(federation, remote_id)
+    if existing_by_id:
+        _error(
+            f"Space already registered: {remote_id} ({existing_by_id['name']})",
+            fix="Use 'admin federated remove' first to unregister",
+        )
+
+    # Check for handle collision
+    existing_by_name = _find_space(federation, remote_name)
+    if existing_by_name and not force:
+        _error(
+            f"Handle collision: '{remote_name}' already registered ({existing_by_name['id']})",
+            fix="Use --force to add anyway, or rename one of the spaces",
+        )
+
+    # Check that we're not adding the local space
+    local_space = _load_space_config(atcha_dir)
+    if local_space and local_space["id"] == remote_id:
+        _error(
+            "Cannot add local space to federation",
+            fix="The local space is always implicitly available",
+        )
+
+    # Add to federation
+    new_space: FederatedSpace = {
+        "id": remote_id,
+        "name": remote_name,
+        "path": str(path),
+        "added": _now_iso(),
+    }
+    federation["spaces"].append(new_space)
+    _save_federation(atcha_dir, federation)
+
+    result = {
+        "status": "added",
+        "id": remote_id,
+        "name": remote_name,
+        "path": str(path),
+    }
+    print(json.dumps(result, indent=2))
+
+
+def cmd_admin_federated_remove(auth: AuthContext, args: argparse.Namespace) -> None:
+    """Unregister a federated space."""
+    atcha_dir = _require_atcha_dir()
+
+    # Require admin auth
+    password = _get_password(auth)
+    if not password:
+        _error("Admin password required", fix="Use --password or set ATCHA_ADMIN_PASS")
+    assert password is not None
+    _require_admin(atcha_dir, password)
+
+    identifier = T.cast(str, args.identifier)
+
+    # Load federation config
+    federation = _load_federation(atcha_dir)
+
+    # Find the space
+    space = _find_space(federation, identifier)
+    if space is None:
+        available = [s["name"] for s in federation["spaces"]]
+        _error(
+            f"Space not found: {identifier}",
+            available=available if available else None,
+            fix="Use 'admin federated list' to see registered spaces",
+        )
+    assert space is not None
+
+    # Remove from federation
+    federation["spaces"] = [s for s in federation["spaces"] if s["id"] != space["id"]]
+    _save_federation(atcha_dir, federation)
+
+    result = {
+        "status": "removed",
+        "id": space["id"],
+        "name": space["name"],
+    }
+    print(json.dumps(result, indent=2))
+
+
+def cmd_admin_federated_list(auth: AuthContext) -> None:
+    """List federated spaces with availability status."""
+    atcha_dir = _require_atcha_dir()
+
+    # Load federation config
+    federation = _load_federation(atcha_dir)
+
+    # Build output with availability status
+    output: list[dict[str, T.Any]] = []
+    for space in federation["spaces"]:
+        output.append({
+            "id": space["id"],
+            "name": space["name"],
+            "path": space["path"],
+            "available": _is_space_available(space),
+        })
+
+    print(json.dumps(output, indent=2))
+
+
+def cmd_admin_users_list(auth: AuthContext) -> None:
+    """List all users as JSON array (admin only).
+
+    Iterates user directories and loads each profile, giving admins
+    a quick overview of all registered users.
+    """
+    atcha_dir = _require_atcha_dir()
+
+    password = _get_password(auth)
+    if not password:
+        _error("Admin password required", fix="Use --password or set ATCHA_ADMIN_PASS")
+    assert password is not None
+    _require_admin(atcha_dir, password)
+
+    users_dir = _get_users_dir(atcha_dir)
+    profiles: list[dict[str, T.Any]] = []
+    if users_dir.is_dir():
+        for user_name in sorted(_iter_user_names(atcha_dir)):
+            user_dir = _get_user_dir(atcha_dir, user_name)
+            profile = _load_profile(user_dir)
+            if profile is not None:
+                profiles.append(dict(profile.items()))
+
+    print(json.dumps(profiles, indent=2))
+
+
+def cmd_admin_users_update(auth: AuthContext, args: argparse.Namespace) -> None:
+    """Update user profile with admin-only fields (name, role, status, about, tags).
+
+    Unlike profile update (self-service), this accepts --name and --role
+    and takes the user address as a positional argument.
+    """
+    atcha_dir = _require_atcha_dir()
+
+    password = _get_password(auth)
+    if not password:
+        _error("Admin password required", fix="Use --password or set ATCHA_ADMIN_PASS")
+    assert password is not None
+    _require_admin(atcha_dir, password)
+
+    address = T.cast(str, args.address)
+    _validate_address_format(address)
+
+    # Resolve user
+    name_part, space_ref = _parse_address(address)
+    if space_ref:
+        # Cross-space admin update not supported
+        _error("admin users update only works on local users")
+    user_id = _resolve_user(atcha_dir, name_part)
+    if user_id is None:
+        users = list(_iter_user_names(atcha_dir))
+        _error(
+            f"User '{address}' not found",
+            available=users if users else None,
+        )
+    assert user_id is not None
+
+    user_dir = _get_user_dir(atcha_dir, user_id)
+    profile = _load_profile(user_dir)
+    if profile is None:
+        _error(f"No profile found for '{user_id}'")
+    assert profile is not None
+
+    # Apply updates
+    new_name = T.cast(str | None, getattr(args, "name", None))
+    role = T.cast(str | None, getattr(args, "role", None))
+    status = T.cast(str | None, getattr(args, "status", None))
+    about = T.cast(str | None, getattr(args, "about", None))
+    tags_str = T.cast(str | None, getattr(args, "tags", None))
+
+    if new_name is not None:
+        # Validate new name
+        valid, err = _validate_username(new_name)
+        if not valid:
+            _error(f"Invalid name '{new_name}': {err}")
+        # Check uniqueness
+        existing = _resolve_user(atcha_dir, new_name)
+        if existing is not None and existing != user_id:
+            _error(f"Name '{new_name}' already exists")
+        profile["name"] = new_name
+
+    if role is not None:
+        profile["role"] = role
+    if status is not None:
+        profile["status"] = status
+    if about is not None:
+        profile["about"] = about
+    if tags_str is not None:
+        profile["tags"] = [t.strip() for t in tags_str.split(",") if t.strip()]
+
+    profile["updated"] = _now_iso()
+    _save_profile(user_dir, profile)
+
+    print(json.dumps(dict(profile.items()), indent=2))
+
+
+def cmd_admin_users_delete(auth: AuthContext, args: argparse.Namespace) -> None:
+    """Delete a user: remove their directory and token file.
+
+    This is irreversible -- the user's messages and profile are permanently lost.
+    """
+    import shutil
+
+    atcha_dir = _require_atcha_dir()
+
+    password = _get_password(auth)
+    if not password:
+        _error("Admin password required", fix="Use --password or set ATCHA_ADMIN_PASS")
+    assert password is not None
+    _require_admin(atcha_dir, password)
+
+    address = T.cast(str, args.address)
+    _validate_address_format(address)
+
+    name_part, space_ref = _parse_address(address)
+    if space_ref:
+        _error("admin users delete only works on local users")
+    user_id = _resolve_user(atcha_dir, name_part)
+    if user_id is None:
+        users = list(_iter_user_names(atcha_dir))
+        _error(
+            f"User '{address}' not found",
+            available=users if users else None,
+        )
+    assert user_id is not None
+
+    # Remove user directory
+    user_dir = _get_user_dir(atcha_dir, user_id)
+    if user_dir.is_dir():
+        shutil.rmtree(user_dir)
+
+    # Remove token file
+    token_file = _get_token_file(atcha_dir, user_id)
+    if token_file.exists():
+        token_file.unlink()
+
+    result = {"status": "deleted", "user": user_id}
+    print(json.dumps(result, indent=2))
+
+
+def cmd_admin_spaces_list(auth: AuthContext) -> None:
+    """List local space + federated spaces.
+
+    Combines the local space identity with the federation registry
+    into a single unified listing.
+    """
+    atcha_dir = _require_atcha_dir()
+
+    password = _get_password(auth)
+    if not password:
+        _error("Admin password required", fix="Use --password or set ATCHA_ADMIN_PASS")
+    assert password is not None
+    _require_admin(atcha_dir, password)
+
+    # Local space
+    local_space = _ensure_space_config(atcha_dir)
+    output: list[dict[str, T.Any]] = [
+        {
+            "id": local_space["id"],
+            "name": local_space["name"],
+            "scope": "local",
+            "available": True,
+        }
+    ]
+
+    # Federated spaces
+    federation = _load_federation(atcha_dir)
+    for space in federation["spaces"]:
+        output.append({
+            "id": space["id"],
+            "name": space["name"],
+            "path": space["path"],
+            "scope": "federated",
+            "available": _is_space_available(space),
+        })
+
+    print(json.dumps(output, indent=2))
+
+
+def cmd_create_token(auth: AuthContext, args: argparse.Namespace) -> None:
     """Create user token (admin only).
 
-    Derives the token deterministically from password + agent name + salt.
+    Derives the token deterministically from password + user name + salt.
     Same inputs always produce the same token. Stores only the hash.
     """
     atcha_dir = _require_atcha_dir()
 
-    # Get password from CLI or env
-    password = T.cast(str | None, args.password) or _get_password_from_env()
+    # Get password from auth context or env
+    password = _get_password(auth)
     if not password:
         _error("Password required", fix="Use --password <password> or set ATCHA_ADMIN_PASS")
 
@@ -894,8 +1600,8 @@ def cmd_create_token(args: argparse.Namespace) -> None:
     if user_id is None:
         users = list(_iter_user_names(atcha_dir))
         _error(
-            f"Agent '{identifier}' not found",
-            fix="Create user with 'atcha users add'",
+            f"User '{identifier}' not found",
+            fix="Create user with 'atcha admin users add'",
             available=users if users else None,
         )
 
@@ -906,7 +1612,7 @@ def cmd_create_token(args: argparse.Namespace) -> None:
     admin_config = T.cast(AdminConfig, json.loads(admin_file.read_text()))
     salt = admin_config["salt"]
 
-    # Derive token deterministically (same password + agent + salt = same token)
+    # Derive token deterministically (same password + user + salt = same token)
     token = _derive_token(password, user_id, salt)
 
     # Store hash (idempotent - same token always produces same hash)
@@ -915,9 +1621,9 @@ def cmd_create_token(args: argparse.Namespace) -> None:
     print(token)
 
 
-def cmd_agents_add(args: argparse.Namespace) -> None:
+def cmd_users_add(auth: AuthContext, args: argparse.Namespace) -> None:
     """Create user account."""
-    atcha_dir, user, is_admin = _require_auth()
+    atcha_dir, user, is_admin = _require_auth(auth)
 
     if not is_admin:
         _error("Admin token required", fix="Set ATCHA_TOKEN to an admin token")
@@ -935,7 +1641,7 @@ def cmd_agents_add(args: argparse.Namespace) -> None:
     if user_dir.is_dir():
         _error(f"User '{user_name}' already exists")
 
-    # Generate unique immutable id
+    # Generate unique immutable id with usr- prefix
     user_id = _generate_user_id()
 
     # Create user directory (based on name for human readability)
@@ -949,7 +1655,7 @@ def cmd_agents_add(args: argparse.Namespace) -> None:
 
     now = _now_iso()
     profile: UserProfile = {
-        "id": user_id,        # Random 5-char code (immutable, globally unique)
+        "id": user_id,        # Random usr-XXXXX code (immutable, globally unique)
         "name": user_name,    # Human-readable name (immutable, unique within workspace)
         "role": role,
         "status": status,
@@ -965,16 +1671,23 @@ def cmd_agents_add(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
-# User commands (Tasks 3.1-3.3)
+# User commands
 # ---------------------------------------------------------------------------
 
 
-def _compact_profile(profile: UserProfile, full: bool = False, show_last_seen_ago: bool = True) -> dict[str, T.Any]:
+def _compact_profile(
+    profile: UserProfile,
+    full: bool = False,
+    show_last_seen_ago: bool = True,
+    space_name: str | None = None,
+    is_local: bool | None = None,
+) -> dict[str, T.Any]:
     """Return profile dict, optionally compacted.
 
     When full=False (default): excludes dates and empty fields, but includes last_seen.
     When full=True: includes all fields.
     When show_last_seen_ago=True: adds last_seen_ago field with human-readable format.
+    When space_name and is_local are provided: adds address and scope fields.
     """
     if full:
         result = dict(profile.items())
@@ -991,57 +1704,46 @@ def _compact_profile(profile: UserProfile, full: bool = False, show_last_seen_ag
         if isinstance(last_seen, str):
             result["last_seen_ago"] = _format_time_ago(last_seen)
 
+    # Add address and scope fields when space info is provided
+    if space_name is not None and is_local is not None:
+        name = profile["name"]
+        if is_local:
+            result["address"] = name
+            result["scope"] = "local"
+        else:
+            result["address"] = f"{name}@{space_name}"
+            result["scope"] = "federated"
+
     return result
 
 
-def cmd_contacts(args: argparse.Namespace) -> None:
-    """List contacts or view a specific contact."""
-    name = T.cast(str | None, args.name)
 
-    # If name provided, show specific contact (delegates to users get)
-    if name:
-        # Create a modified args for users_get
-        get_args = argparse.Namespace()
-        get_args.name = name
-        get_args.full = T.cast(bool, getattr(args, "full", False))
-        cmd_agents_get(get_args)
-        return
-
-    # Otherwise list all contacts (delegates to agents_list)
-    list_args = argparse.Namespace()
-    list_args.names_only = T.cast(bool, getattr(args, "names_only", False))
-    list_args.include_self = T.cast(bool, getattr(args, "include_self", False))
-    list_args.tags = T.cast(str | None, getattr(args, "tags", None))
-    list_args.full = T.cast(bool, getattr(args, "full", False))
-    cmd_agents_list(list_args)
-
-
-def cmd_agents_list(args: argparse.Namespace) -> None:
-    """List team agents."""
+def cmd_users_list(auth: AuthContext, args: argparse.Namespace) -> None:
+    """List team users from local and federated spaces."""
     atcha_dir = _get_atcha_dir()
     if atcha_dir is None:
         print("[]")
         return
 
-    # Check for duplicate names and error
+    # Check for duplicate names and error (only for local space)
     duplicates = _find_duplicate_names(atcha_dir)
     if duplicates:
         lines = [f"  name '{name}' used by: {', '.join(ids)}" for name, ids in duplicates.items()]
         _error(
-            "Duplicate agent names detected:\n" + "\n".join(lines),
-            fix="Agent names must be unique. Rename users so each has a distinct name (first component of id)",
+            "Duplicate user names detected:\n" + "\n".join(lines),
+            fix="User names must be unique. Rename users so each has a distinct name (first component of id)",
         )
 
-    names_only = T.cast(bool, getattr(args, "names_only", False))
     include_self = T.cast(bool, getattr(args, "include_self", False))
     full = T.cast(bool, getattr(args, "full", False))
     tags_filter = T.cast(str | None, getattr(args, "tags", None))
     tags_set = {t.strip() for t in tags_filter.split(",") if t.strip()} if tags_filter else None
+    space_filter = T.cast(str | None, getattr(args, "space", None))
 
     # Determine if we should exclude self (default: yes, unless --include-self or admin)
     current_user: str | None = None
     is_admin = False
-    token = _get_token()
+    token = _get_token(auth)
     if token:
         result = _validate_token(atcha_dir, token)
         if result:
@@ -1050,36 +1752,81 @@ def cmd_agents_list(args: argparse.Namespace) -> None:
     # Admin sees all; otherwise exclude self unless --include-self
     exclude_self = not is_admin and not include_self
 
-    if names_only:
-        # Just agent names
-        for user_name in sorted(_iter_user_names(atcha_dir)):
-            if exclude_self and user_name == current_user:
+    # Load local space config
+    local_space = _ensure_space_config(atcha_dir)
+    local_name = local_space["name"]
+
+    # Load federation config
+    federation = _load_federation(atcha_dir)
+
+    # Track unavailable spaces for warning
+    unavailable_spaces: list[tuple[str, str]] = []  # (handle, path)
+
+    # Build list of (space_path, space_name, is_local) to iterate
+    spaces_to_check: list[tuple[Path, str, bool]] = []
+
+    # Check if we should include local space
+    if space_filter is None or space_filter == local_name or space_filter == local_space["id"]:
+        spaces_to_check.append((atcha_dir, local_name, True))
+
+    # Check federated spaces
+    for fed_space in federation["spaces"]:
+        # If filtering by space, check if this matches
+        if space_filter is not None:
+            if fed_space["name"] != space_filter and fed_space["id"] != space_filter:
                 continue
-            if tags_set:
-                user_dir = _get_user_dir(atcha_dir, user_name)
-                profile = _load_profile(user_dir)
-                if profile and not tags_set.intersection(profile.get("tags", [])):
-                    continue
-            print(user_name)
-    else:
-        # List all profiles as JSON array
-        profiles: list[dict[str, T.Any]] = []
-        for user_name in sorted(_iter_user_names(atcha_dir)):
-            if exclude_self and user_name == current_user:
+
+        space_path = Path(fed_space["path"])
+        if not space_path.is_dir():
+            unavailable_spaces.append((fed_space["name"], fed_space["path"]))
+            continue
+
+        # Refresh handle from remote space.json if available
+        remote_config = _load_space_config(space_path)
+        if remote_config:
+            space_name = remote_config["name"]
+        else:
+            space_name = fed_space["name"]
+
+        spaces_to_check.append((space_path, space_name, False))
+
+    # If filtering by space and no matches found, check if it was an invalid filter
+    if space_filter is not None and not spaces_to_check and not unavailable_spaces:
+        available = [local_name] + [s["name"] for s in federation["spaces"]]
+        _error(
+            f"Unknown space: {space_filter}",
+            available=available,
+            fix="Use 'admin federated list' to see available spaces",
+        )
+
+    # List all profiles as JSON array
+    profiles: list[dict[str, T.Any]] = []
+    for space_path, space_name, is_local in spaces_to_check:
+        for user_name in sorted(_iter_user_names(space_path)):
+            if exclude_self and is_local and user_name == current_user:
                 continue
-            user_dir = _get_user_dir(atcha_dir, user_name)
+            user_dir = _get_user_dir(space_path, user_name)
             profile = _load_profile(user_dir)
             if profile is None:
                 continue
             if tags_set and not tags_set.intersection(profile.get("tags", [])):
                 continue
-            profiles.append(_compact_profile(profile, full=full))
+            # Include address and scope for all users
+            profiles.append(_compact_profile(profile, full=full, space_name=space_name, is_local=is_local))
 
-        print(json.dumps(profiles, indent=2))
+    print(json.dumps(profiles, indent=2))
+
+    # Print unavailable space warnings to stderr
+    for handle, path in unavailable_spaces:
+        print(f"WARNING: space unavailable: {handle} (path not found: {path})", file=sys.stderr)
 
 
-def cmd_agents_get(args: argparse.Namespace) -> None:
-    """View a specific user's profile."""
+def cmd_users_get(auth: AuthContext, args: argparse.Namespace) -> None:
+    """View a specific user's profile.
+
+    Supports cross-space lookup with name@space syntax.
+    When a bare name matches users in multiple spaces, shows all matches.
+    """
     atcha_dir = _get_atcha_dir()
     if atcha_dir is None:
         _error(".atcha directory not found")
@@ -1087,41 +1834,146 @@ def cmd_agents_get(args: argparse.Namespace) -> None:
     assert atcha_dir is not None
     identifier = T.cast(str, args.name)
     full = T.cast(bool, getattr(args, "full", False))
+    space_filter = T.cast(str | None, getattr(args, "space", None))
 
-    # Resolve identifier (can be id or short name)
-    user_id = _resolve_user(atcha_dir, identifier)
-    if user_id is None:
+    # Parse address for potential cross-space lookup
+    name, space_ref = _parse_address(identifier)
+
+    # If --space flag was provided, use it as the space_ref
+    if space_filter and not space_ref:
+        space_ref = space_filter
+
+    # Load local space config
+    local_space = _ensure_space_config(atcha_dir)
+    local_name = local_space["name"]
+
+    # Load federation config
+    federation = _load_federation(atcha_dir)
+
+    if space_ref:
+        # Qualified address: name@space or --space filter
+        resolved = _resolve_space(atcha_dir, space_ref)
+        if resolved is None:
+            available = [local_name] + [s["name"] for s in federation["spaces"]]
+            _error(
+                f"Unknown space: {space_ref}",
+                available=available,
+                fix="Use 'admin federated list' to see available spaces",
+            )
+        target_dir, space_config = resolved
+        user_id = _resolve_user(target_dir, name)
+        if user_id is None:
+            users = list(_iter_user_names(target_dir))
+            _error(
+                f"User '{name}' not found in {space_config['name']}",
+                available=users if users else None,
+            )
+        assert user_id is not None
+        user_dir = _get_user_dir(target_dir, user_id)
+        profile = _load_profile(user_dir)
+        if profile is None:
+            _error(f"No profile found for '{user_id}'")
+        assert profile is not None
+        is_local = (target_dir == atcha_dir)
+        output = _compact_profile(profile, full=full, space_name=space_config["name"], is_local=is_local)
+        print(json.dumps(output, indent=2))
+        return
+
+    # Bare name: collect matches across all spaces
+    # Tuple: (user_id, space_path, space_name, profile, is_local)
+    matches: list[tuple[str, Path, str, UserProfile, bool]] = []
+
+    # Check local space first
+    user_id = _resolve_user(atcha_dir, name)
+    if user_id:
+        user_dir = _get_user_dir(atcha_dir, user_id)
+        profile = _load_profile(user_dir)
+        if profile:
+            matches.append((user_id, atcha_dir, local_name, profile, True))
+
+    # Check federated spaces
+    for fed_space in federation["spaces"]:
+        space_path = Path(fed_space["path"])
+        if not space_path.is_dir():
+            continue
+
+        # Refresh handle from remote space.json if available
+        remote_config = _load_space_config(space_path)
+        if remote_config:
+            space_name = remote_config["name"]
+        else:
+            space_name = fed_space["name"]
+
+        user_id = _resolve_user(space_path, name)
+        if user_id:
+            user_dir = _get_user_dir(space_path, user_id)
+            profile = _load_profile(user_dir)
+            if profile:
+                matches.append((user_id, space_path, space_name, profile, False))
+
+    if not matches:
+        # No matches found anywhere
         users = list(_iter_user_names(atcha_dir))
         _error(
-            f"Agent '{identifier}' not found",
+            f"User '{name}' not found",
             available=users if users else None,
         )
 
-    assert user_id is not None
-    user_dir = _get_user_dir(atcha_dir, user_id)
+    if len(matches) == 1:
+        # Single match - show profile with address and scope
+        user_id, space_path, space_name, profile, is_local = matches[0]
+        output = _compact_profile(profile, full=full, space_name=space_name, is_local=is_local)
+        print(json.dumps(output, indent=2))
+    else:
+        # Multiple matches - show all with address and scope
+        profiles_output: list[dict[str, T.Any]] = []
+        for user_id, space_path, space_name, profile, is_local in matches:
+            profiles_output.append(_compact_profile(profile, full=full, space_name=space_name, is_local=is_local))
+        print(json.dumps(profiles_output, indent=2))
+
+
+def cmd_whoami(auth: AuthContext, args: argparse.Namespace) -> None:
+    """Print identity info. Default: address format (name@). --id: user ID. --name: bare name."""
+    atcha_dir, user_name = _require_user(auth)
+    show_id = T.cast(bool, getattr(args, "show_id", False))
+    show_name = T.cast(bool, getattr(args, "show_name", False))
+
+    # Load profile to get the user ID
+    user_dir = _get_user_dir(atcha_dir, user_name)
     profile = _load_profile(user_dir)
-    if profile is None:
-        _error(f"No profile found for '{user_id}'")
 
-    assert profile is not None
-    output = _compact_profile(profile, full=full)
-    print(json.dumps(output, indent=2))
+    if show_id:
+        user_id = profile["id"] if profile else user_name
+        if auth.json_output:
+            print(json.dumps({"id": user_id}))
+        else:
+            print(user_id)
+    elif show_name:
+        name = profile["name"] if profile else user_name
+        if auth.json_output:
+            print(json.dumps({"name": name}))
+        else:
+            print(name)
+    else:
+        # Default: address format (name@)
+        name = profile["name"] if profile else user_name
+        user_id = profile["id"] if profile else user_name
+        address = f"{name}@"
+        if auth.json_output:
+            print(json.dumps({"address": address, "id": user_id, "name": name}))
+        else:
+            print(address)
 
 
-def cmd_whoami(_args: argparse.Namespace) -> None:
-    """Print your username."""
-    _atcha_dir, user_name = _require_user()
-    print(user_name)
-
-
-def cmd_agents_update(args: argparse.Namespace) -> None:
+def cmd_users_update(auth: AuthContext, args: argparse.Namespace) -> None:
     """Update a user's profile.
 
     Immutable fields: id, name
     Admin-only fields: role
     User-updatable fields: status, tags, about
     """
-    identifier = T.cast(str | None, getattr(args, "name", None))
+    # --as-user on profile update targets the user to update
+    identifier = auth.as_user
     status = T.cast(str | None, getattr(args, "status", None))
     tags_str = T.cast(str | None, getattr(args, "tags", None))
     about = T.cast(str | None, getattr(args, "about", None))
@@ -1134,10 +1986,10 @@ def cmd_agents_update(args: argparse.Namespace) -> None:
     is_admin = False
     if identifier is None:
         # Updating self
-        _, user_id, is_admin = _require_auth()
+        _, user_id, is_admin = _require_auth(auth)
     else:
         # Updating another user - requires admin
-        _, _auth_user, is_admin = _require_auth()
+        _, _auth_user, is_admin = _require_auth(auth)
         if not is_admin:
             _error(
                 "Admin authentication required to update other users",
@@ -1187,29 +2039,27 @@ def cmd_agents_update(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Message commands (Tasks 4.1-4.3)
+# Message commands
 # ---------------------------------------------------------------------------
 
 
-def cmd_profile(args: argparse.Namespace) -> None:
+def cmd_profile(auth: AuthContext, args: argparse.Namespace) -> None:
     """Profile command - update user profile."""
     profile_command = T.cast(str | None, getattr(args, "profile_command", None))
 
     if profile_command == "update":
-        # Delegate to agents_update
-        update_args = argparse.Namespace()
-        update_args.name = T.cast(str | None, getattr(args, "name", None))
-        update_args.token = T.cast(str | None, getattr(args, "token", None))
-        update_args.password = T.cast(str | None, getattr(args, "password", None))
-        update_args.status = T.cast(str | None, getattr(args, "status", None))
-        update_args.role = T.cast(str | None, getattr(args, "role", None))
-        update_args.tags = T.cast(str | None, getattr(args, "tags", None))
-        update_args.about = T.cast(str | None, getattr(args, "about", None))
-        update_args.full = T.cast(bool, getattr(args, "full", False))
-        cmd_agents_update(update_args)
+        cmd_users_update(auth, args)
     else:
-        print("Usage: atcha profile update [options]", file=sys.stderr)
-        sys.exit(1)
+        # Default: show own profile
+        atcha_dir, user_id = _require_user(auth)
+        full = T.cast(bool, getattr(args, "full", False))
+        user_dir = _get_user_dir(atcha_dir, user_id)
+        profile = _load_profile(user_dir)
+        if profile is None:
+            _error(f"No profile found for '{user_id}'")
+        assert profile is not None
+        output = _compact_profile(profile, full=full)
+        print(json.dumps(output, indent=2))
 
 
 def _get_message_content(msg: Message) -> str:
@@ -1217,33 +2067,19 @@ def _get_message_content(msg: Message) -> str:
     return T.cast(str, msg.get("content") or msg.get("body", ""))
 
 
-def cmd_messages(args: argparse.Namespace) -> None:
-    """Check messages summary or read messages."""
-    messages_command = T.cast(str | None, getattr(args, "messages_command", None))
 
-    if messages_command is None:
-        print("Usage: atcha messages <check|list|read> [options]", file=sys.stderr)
-        sys.exit(1)
-    elif messages_command == "check":
-        cmd_messages_check(args)
-    elif messages_command == "read":
-        # Handle --all as alias for --include-read
-        if getattr(args, "all", False):
-            args.include_read = True
-        cmd_messages_read(args)
-    elif messages_command == "list":
-        cmd_messages_list(args)
-
-
-def cmd_messages_check(args: argparse.Namespace) -> None:
+def cmd_messages_check(auth: AuthContext) -> None:
     """Check inbox summary."""
-    atcha_dir, user_name = _require_user()
+    atcha_dir, user_name = _require_user(auth)
 
     user_dir = _get_user_dir(atcha_dir, user_name)
     inbox = user_dir / "messages" / "inbox.jsonl"
 
     if not inbox.exists() or inbox.stat().st_size == 0:
-        print("No messages")
+        if auth.json_output:
+            print(json.dumps({"count": 0, "senders": {}}))
+        else:
+            print("No messages")
         return
 
     # Get last_read for unread filtering
@@ -1252,6 +2088,11 @@ def cmd_messages_check(args: argparse.Namespace) -> None:
     if state_file.exists():
         state = T.cast(MessagesState, json.loads(state_file.read_text()))
         last_read = state.get("last_read")
+
+    # Load space info for cross-space sender formatting
+    local_space = _ensure_space_config(atcha_dir)
+    federation = _load_federation(atcha_dir)
+    warnings: set[str] = set()
 
     # Collect and count messages
     messages: list[Message] = []
@@ -1270,84 +2111,102 @@ def cmd_messages_check(args: argparse.Namespace) -> None:
             continue
 
         messages.append(msg)
-        sender = msg["from"]
-        sender_counts[sender] = sender_counts.get(sender, 0) + 1
+        # Format sender with space suffix if cross-space
+        formatted_sender, warning = _format_sender(msg, local_space["id"], federation)
+        if warning:
+            warnings.add(warning)
+        sender_counts[formatted_sender] = sender_counts.get(formatted_sender, 0) + 1
 
     if not messages:
-        print("No messages")
+        if auth.json_output:
+            print(json.dumps({"count": 0, "senders": {}}))
+        else:
+            print("No messages")
         return
 
     count = len(messages)
-    if count == 1:
-        sender = messages[0]["from"]
-        print(f"1 unread message from {sender}")
+
+    if auth.json_output:
+        print(json.dumps({"count": count, "senders": sender_counts}))
     else:
-        breakdown = ", ".join(
-            f"{cnt} from {sender}"
-            for sender, cnt in sorted(sender_counts.items(), key=lambda x: -x[1])
-        )
-        print(f"{count} unread messages: {breakdown}")
+        if count == 1:
+            formatted_sender, warning = _format_sender(messages[0], local_space["id"], federation)
+            if warning:
+                warnings.add(warning)
+            print(f"1 unread message from {formatted_sender}")
+        else:
+            breakdown = ", ".join(
+                f"{cnt} from {sender}"
+                for sender, cnt in sorted(sender_counts.items(), key=lambda x: -x[1])
+            )
+            print(f"{count} unread messages: {breakdown}")
+
+    # Print warnings for unknown spaces
+    for warning in sorted(warnings):
+        print(f"WARNING: {warning}", file=sys.stderr)
 
 
-def cmd_messages_read(args: argparse.Namespace) -> None:
+def cmd_messages_read(auth: AuthContext, args: argparse.Namespace) -> None:
     """Read full messages, mark as read."""
-    atcha_dir, user_id, is_admin = _require_auth()
+    atcha_dir, user_id, is_admin = _require_auth(auth)
 
-    # Admin must use --user to read a user's inbox
+    # Admin must use --as-user to read a user's inbox
     if is_admin:
-        if not _cli_user:
-            if _cli_password:
+        if not auth.as_user:
+            if auth.password:
                 _error(
                     "--password authenticates as admin, not as a user",
-                    fix="Use --user <id-or-name> to act on behalf of a user, or use a user token",
+                    fix="Use --as-user <user-id> to act as a user, or use a user token",
                 )
             _error(
                 "Admin token cannot be used for user operations",
-                fix="Use --user <id-or-name> to act on behalf of a user, or use a user token",
+                fix="Use --as-user <user-id> to act as a user, or use a user token",
             )
-        # Resolve and verify the target agent exists
-        resolved_id = _resolve_user(atcha_dir, _cli_user)
+        # Resolve and verify the target user exists
+        resolved_id = _resolve_user(atcha_dir, auth.as_user)
         if resolved_id is None:
             users = list(_iter_user_names(atcha_dir))
             _error(
-                f"Agent '{_cli_user}' not found",
+                f"User '{auth.as_user}' not found",
                 available=users if users else None,
             )
         assert resolved_id is not None
         user_id = resolved_id
         user_dir = _get_user_dir(atcha_dir, user_id)
     else:
-        if _cli_user:
+        if auth.as_user:
             _error(
-                "--user requires admin authentication",
-                fix="Use --password or admin --token with --user",
+                "--as-user requires admin authentication",
+                fix="Use --password with --as-user",
             )
         user_dir = _get_user_dir(atcha_dir, user_id)
 
-    # Determine if we should include 'to' field (only for admin impersonating)
-    include_to_field = is_admin and _cli_user is not None
+    # Include 'to' field when admin is acting as another user (useful for debugging)
+    include_to_field = is_admin and auth.as_user is not None
 
     inbox = user_dir / "messages" / "inbox.jsonl"
 
     if not inbox.exists() or inbox.stat().st_size == 0:
-        return  # Silent exit
+        if auth.json_output:
+            print("[]")
+        return  # Silent exit for non-json
+
+    # Load space info for cross-space sender formatting
+    local_space = _ensure_space_config(atcha_dir)
+    federation = _load_federation(atcha_dir)
+    warnings: set[str] = set()
 
     # Parse filter options
-    since_filter = T.cast(str | None, getattr(args, "since", None))
-    from_filter = T.cast(str | None, getattr(args, "from_user", None))
-    include_read = T.cast(bool, getattr(args, "include_read", False))
     no_mark = T.cast(bool, getattr(args, "no_mark", False))
-    target_ids = T.cast(list[str] | None, getattr(args, "ids", None))
-    target_ids_set = set(target_ids) if target_ids else None
+    target_ids = T.cast(list[str], getattr(args, "ids", []))
+    if not target_ids:
+        _error("at least one message ID required")
+    target_ids_set = set(target_ids)
 
-    # Get last_read for unread filtering
     state_file = user_dir / "messages" / "state.json"
-    last_read: str | None = None
-    if not include_read and state_file.exists():
-        state = T.cast(MessagesState, json.loads(state_file.read_text()))
-        last_read = state.get("last_read")
 
     latest_ts: str | None = None
+    json_array_msgs: list[dict[str, T.Any]] = []
 
     for line in inbox.read_text().splitlines():
         if not line.strip():
@@ -1357,84 +2216,87 @@ def cmd_messages_read(args: argparse.Namespace) -> None:
         except json.JSONDecodeError:
             continue
 
-        # If specific IDs requested, filter by them
-        if target_ids_set:
-            if msg.get("id") not in target_ids_set:
-                continue
-        else:
-            # Filter by last_read (show only unread, unless --include-read)
-            if last_read and msg["ts"] <= last_read:
-                continue
-
-        # Filter by --since
-        if since_filter and msg["ts"] <= since_filter:
-            continue
-
-        # Filter by --from
-        if from_filter and msg["from"] != from_filter:
+        # Filter by requested IDs (always required)
+        if msg.get("id") not in target_ids_set:
             continue
 
         # Track latest timestamp
         if latest_ts is None or msg["ts"] > latest_ts:
             latest_ts = msg["ts"]
 
-        # Prepare output (exclude 'to' field unless admin impersonating)
+        # Prepare output (exclude 'to' field unless admin acting as user)
         if include_to_field:
-            output = msg
+            output: dict[str, T.Any] = dict(msg)
         else:
             output = {k: v for k, v in msg.items() if k != "to"}
 
-        print(json.dumps(output, separators=(",", ":")))
+        # Format sender with @space suffix if cross-space
+        formatted_sender, warning = _format_sender(msg, local_space["id"], federation)
+        if warning:
+            warnings.add(warning)
+        output["from"] = formatted_sender
+
+        if auth.json_output:
+            json_array_msgs.append(output)
+        else:
+            print(json.dumps(output, separators=(",", ":")))
+
+    if auth.json_output:
+        print(json.dumps(json_array_msgs, indent=2))
 
     # Mark as read (unless --no-mark)
     if latest_ts is not None and not no_mark:
-        state: MessagesState = {}
+        state_data: MessagesState = {}
         if state_file.exists():
-            state = T.cast(MessagesState, json.loads(state_file.read_text()))
-        state["last_read"] = latest_ts
-        _ = state_file.write_text(json.dumps(state) + "\n")
+            state_data = T.cast(MessagesState, json.loads(state_file.read_text()))
+        state_data["last_read"] = latest_ts
+        _ = state_file.write_text(json.dumps(state_data) + "\n")
 
         # Update user's last_seen timestamp
         _update_last_seen(user_dir)
 
+    # Print warnings for unknown spaces
+    for warning in sorted(warnings):
+        print(f"WARNING: {warning}", file=sys.stderr)
 
-def cmd_messages_list(args: argparse.Namespace) -> None:
+
+def cmd_messages_list(auth: AuthContext, args: argparse.Namespace) -> None:
     """List messages as JSON array with previews. No side effects."""
-    atcha_dir, user_id, is_admin = _require_auth()
+    atcha_dir, user_id, is_admin = _require_auth(auth)
 
-    # Admin must use --user to read a user's inbox
+    # Admin must use --as-user to list a user's messages
     if is_admin:
-        if not _cli_user:
-            if _cli_password:
+        if not auth.as_user:
+            if auth.password:
                 _error(
                     "--password authenticates as admin, not as a user",
-                    fix="Use --user <id-or-name> to act on behalf of a user, or use a user token",
+                    fix="Use --as-user <user-id> to act as a user, or use a user token",
                 )
             _error(
                 "Admin token cannot be used for user operations",
-                fix="Use --user <id-or-name> to act on behalf of a user, or use a user token",
+                fix="Use --as-user <user-id> to act as a user, or use a user token",
             )
-        # Resolve and verify the target agent exists
-        resolved_id = _resolve_user(atcha_dir, _cli_user)
+        # Resolve and verify the target user exists
+        resolved_id = _resolve_user(atcha_dir, auth.as_user)
         if resolved_id is None:
             users = list(_iter_user_names(atcha_dir))
             _error(
-                f"Agent '{_cli_user}' not found",
+                f"User '{auth.as_user}' not found",
                 available=users if users else None,
             )
         assert resolved_id is not None
         user_id = resolved_id
         user_dir = _get_user_dir(atcha_dir, user_id)
     else:
-        if _cli_user:
+        if auth.as_user:
             _error(
-                "--user requires admin authentication",
-                fix="Use --password or admin --token with --user",
+                "--as-user requires admin authentication",
+                fix="Use --password with --as-user",
             )
         user_dir = _get_user_dir(atcha_dir, user_id)
 
-    # Determine if we should include 'to' field (only for admin impersonating)
-    include_to_field = is_admin and _cli_user is not None
+    # Include 'to' field when admin is acting as another user (useful for debugging)
+    include_to_field = is_admin and auth.as_user is not None
 
     inbox = user_dir / "messages" / "inbox.jsonl"
 
@@ -1442,17 +2304,23 @@ def cmd_messages_list(args: argparse.Namespace) -> None:
         print("[]")
         return
 
+    # Load space info for cross-space sender formatting
+    local_space = _ensure_space_config(atcha_dir)
+    federation = _load_federation(atcha_dir)
+    warnings: set[str] = set()
+
     # Parse filter options
+    since_filter = T.cast(str | None, getattr(args, "since", None))
     from_filter = T.cast(str | None, getattr(args, "from_user", None))
     thread_filter = T.cast(str | None, getattr(args, "thread", None))
     limit = T.cast(int | None, getattr(args, "limit", None))
-    include_all = T.cast(bool, getattr(args, "all", False))
+    include_read = T.cast(bool, getattr(args, "include_read", False))
     no_preview = T.cast(bool, getattr(args, "no_preview", False))
 
     # Get last_read for unread filtering
     state_file = user_dir / "messages" / "state.json"
     last_read: str | None = None
-    if not include_all and state_file.exists():
+    if not include_read and state_file.exists():
         state = T.cast(MessagesState, json.loads(state_file.read_text()))
         last_read = state.get("last_read")
 
@@ -1466,12 +2334,16 @@ def cmd_messages_list(args: argparse.Namespace) -> None:
         except json.JSONDecodeError:
             continue
 
-        # Filter by last_read (show only unread, unless --all)
+        # Filter by last_read (show only unread, unless --include-read)
         if last_read and msg["ts"] <= last_read:
             continue
 
+        # Filter by --since
+        if since_filter and msg["ts"] <= since_filter:
+            continue
+
         # Filter by --from
-        if from_filter and msg["from"] != from_filter:
+        if from_filter and not _match_sender_address(msg, from_filter):
             continue
 
         # Filter by --thread
@@ -1483,6 +2355,12 @@ def cmd_messages_list(args: argparse.Namespace) -> None:
             output: dict[str, T.Any] = dict(msg)
         else:
             output = {k: v for k, v in msg.items() if k != "to"}
+
+        # Format sender with @space suffix if cross-space
+        formatted_sender, warning = _format_sender(msg, local_space["id"], federation)
+        if warning:
+            warnings.add(warning)
+        output["from"] = formatted_sender
 
         # Handle content/body field
         content = _get_message_content(msg)
@@ -1509,6 +2387,10 @@ def cmd_messages_list(args: argparse.Namespace) -> None:
             break
 
     print(json.dumps(messages, indent=2))
+
+    # Print warnings for unknown spaces
+    for warning in sorted(warnings):
+        print(f"WARNING: {warning}", file=sys.stderr)
 
 
 def _find_message_by_id(atcha_dir: Path, user: str, msg_id: str) -> Message | None:
@@ -1545,14 +2427,14 @@ def _find_message_by_id(atcha_dir: Path, user: str, msg_id: str) -> Message | No
 
 
 def _get_thread_participants(atcha_dir: Path, thread_id: str) -> list[str]:
-    """Get all unique participants in a thread by searching all agent inboxes and sent logs."""
+    """Get all unique participants in a thread by searching all user inboxes and sent logs."""
     participants: set[str] = set()
 
     users_dir = atcha_dir / "users"
     if not users_dir.exists():
         return []
 
-    # Search all agent directories for messages in this thread
+    # Search all user directories for messages in this thread
     for user_dir in users_dir.iterdir():
         if not user_dir.is_dir():
             continue
@@ -1568,7 +2450,7 @@ def _get_thread_participants(atcha_dir: Path, thread_id: str) -> list[str]:
                     if msg.get("thread_id") == thread_id:
                         # Add sender
                         if "from" in msg:
-                            participants.add(msg["from"])
+                            participants.add(_get_sender_name(msg))
                         # Add recipients
                         if "to" in msg:
                             to_field = msg["to"]
@@ -1590,7 +2472,7 @@ def _get_thread_participants(atcha_dir: Path, thread_id: str) -> list[str]:
                     if msg.get("thread_id") == thread_id:
                         # Add sender
                         if "from" in msg:
-                            participants.add(msg["from"])
+                            participants.add(_get_sender_name(msg))
                         # Add recipients
                         if "to" in msg:
                             to_field = msg["to"]
@@ -1604,31 +2486,41 @@ def _get_thread_participants(atcha_dir: Path, thread_id: str) -> list[str]:
     return sorted(participants)
 
 
-def cmd_send(args: argparse.Namespace) -> None:
-    """Send message."""
-    atcha_dir, sender = _require_user()
+def cmd_send(auth: AuthContext, args: argparse.Namespace) -> None:
+    """Send message (local or cross-space)."""
+    atcha_dir, sender = _require_user(auth)
     sender_dir = _get_user_dir(atcha_dir, sender)
+
+    # Get sender's profile for their ID
+    sender_profile = _load_profile(sender_dir)
+    if sender_profile is None:
+        _error(f"Could not load profile for sender '{sender}'")
+    assert sender_profile is not None
+    sender_id = sender_profile["id"]
+
+    # Get local space config for from field
+    local_space = _ensure_space_config(atcha_dir)
 
     content = T.cast(str, args.content)
     recipient_ids = T.cast(list[str] | None, args.recipients)
-    send_all = T.cast(bool, args.all)
+    send_broadcast = T.cast(bool, args.broadcast)
     reply_to_id = T.cast(str | None, args.reply_to)
 
     # Validate recipient combinations
-    if send_all and reply_to_id:
+    if send_broadcast and reply_to_id:
         _error(
-            "Cannot use --all with --reply-to (ambiguous)",
-            fix="Use '--reply-to MSG_ID' to reply to thread participants, or '--all' to broadcast to all contacts",
+            "Cannot use --broadcast with --reply-to (ambiguous)",
+            fix="Use '--reply-to MSG_ID' to reply to thread participants, or '--broadcast' to broadcast to all contacts",
         )
 
-    if not recipient_ids and not send_all and not reply_to_id:
+    if not recipient_ids and not send_broadcast and not reply_to_id:
         _error(
             "No recipients specified",
-            fix="Use '--to NAME', '--all', or '--reply-to MSG_ID'",
+            fix="Use '--to NAME', '--broadcast', or '--reply-to MSG_ID'",
         )
 
-    # Determine final recipient list and thread context
-    recipients: list[str] = []
+    # Resolved recipient: (user_id, target_atcha_dir, space_config, is_cross_space)
+    resolved_recipients: list[tuple[str, Path, SpaceConfig, bool]] = []
     thread_id: str | None = None
     reply_to_msg: Message | None = None
 
@@ -1645,6 +2537,7 @@ def cmd_send(args: argparse.Namespace) -> None:
         thread_id = T.cast(str, reply_to_msg.get("thread_id") or reply_to_msg["id"])
 
         # Get thread participants (original sender + all recipients in thread)
+        # Note: For now, thread participants are local-only. Cross-space thread support is future work.
         thread_participants = _get_thread_participants(atcha_dir, thread_id)
 
         if recipient_ids:
@@ -1654,44 +2547,65 @@ def cmd_send(args: argparse.Namespace) -> None:
                 if resolved is None:
                     users = list(_iter_user_names(atcha_dir))
                     _error(
-                        f"Agent '{recip_id}' not found",
+                        f"User '{recip_id}' not found",
                         available=users if users else None,
                     )
                 if resolved not in thread_participants:
                     _error(
-                        f"Agent '{resolved}' is not in thread '{thread_id}'",
+                        f"User '{resolved}' is not in thread '{thread_id}'",
                         fix=f"Thread participants: {', '.join(thread_participants)}. Use '--to' without '--reply-to' to start a new thread.",
                     )
-                recipients.append(resolved)
+                # For reply-to, we only support local recipients for now
+                resolved_recipients.append((resolved, atcha_dir, local_space, False))
         else:
             # No --to: reply to all thread participants (excluding self)
-            recipients = [p for p in thread_participants if p != sender]
+            for p in thread_participants:
+                if p != sender:
+                    resolved_recipients.append((p, atcha_dir, local_space, False))
 
-    elif send_all:
-        # Broadcast to all contacts (excluding self)
-        all_agents = list(_iter_user_names(atcha_dir))
-        recipients = [a for a in all_agents if a != sender]
+    elif send_broadcast:
+        # Broadcast to all contacts (excluding self) - local only
+        all_users = list(_iter_user_names(atcha_dir))
+        for a in all_users:
+            if a != sender:
+                resolved_recipients.append((a, atcha_dir, local_space, False))
 
     elif recipient_ids:
-        # Explicit recipients: resolve each name/id
-        for recip_id in recipient_ids:
-            resolved = _resolve_user(atcha_dir, recip_id)
+        # Explicit recipients: resolve each name/id, potentially cross-space
+        for recip_addr in recipient_ids:
+            resolved = _resolve_user_cross_space(atcha_dir, recip_addr)
             if resolved is None:
                 users = list(_iter_user_names(atcha_dir))
                 _error(
-                    f"Agent '{recip_id}' not found",
+                    f"User '{recip_addr}' not found",
                     available=users if users else None,
                 )
-            recipients.append(resolved)
+            user_id, target_dir, space_config = resolved
+            is_cross_space = space_config["id"] != local_space["id"]
 
-    # Remove duplicates while preserving order
-    seen: set[str] = set()
-    recipients = [r for r in recipients if r not in seen and not seen.add(r)]  # type: ignore
+            # Check if cross-space target is available
+            if is_cross_space and not target_dir.is_dir():
+                _error(
+                    f"space unavailable: {space_config['name']} (path not found: {target_dir})",
+                    fix="Re-register the space with correct path using 'admin federated add'",
+                )
 
-    if not recipients:
+            resolved_recipients.append((user_id, target_dir, space_config, is_cross_space))
+
+    # Remove duplicates while preserving order (by user_id + space_id)
+    seen: set[tuple[str, str]] = set()
+    unique_recipients: list[tuple[str, Path, SpaceConfig, bool]] = []
+    for r in resolved_recipients:
+        key = (r[0], r[2]["id"])  # (user_id, space_id)
+        if key not in seen:
+            seen.add(key)
+            unique_recipients.append(r)
+    resolved_recipients = unique_recipients
+
+    if not resolved_recipients:
         _error(
             "No recipients after filtering",
-            fix="Ensure you're not the only agent, or that thread has other participants",
+            fix="Ensure you're not the only user, or that thread has other participants",
         )
 
     # Construct message
@@ -1702,11 +2616,24 @@ def cmd_send(args: argparse.Namespace) -> None:
     if thread_id is None:
         thread_id = msg_id  # First message in thread: thread_id = id
 
-    msg: Message = {
+    # Build recipient names list for the message (just user names, without @space)
+    recipient_names = [r[0] for r in resolved_recipients]
+
+    # Build structured sender info (stores both names and IDs for durability)
+    sender_address = f"{sender}@{local_space['name']}"
+    base_msg: Message = {
         "id": msg_id,
         "thread_id": thread_id,
-        "from": sender,
-        "to": recipients,
+        "from": {
+            "name": sender,
+            "id": sender_id,
+            "address": sender_address,
+            "space": {
+                "name": local_space["name"],
+                "id": local_space["id"],
+            },
+        },
+        "to": recipient_names,
         "ts": ts,
         "type": "message",
         "content": content,
@@ -1714,32 +2641,39 @@ def cmd_send(args: argparse.Namespace) -> None:
 
     # Add reply_to field if replying
     if reply_to_id:
-        msg["reply_to"] = reply_to_id
-
-    line = json.dumps(msg, separators=(",", ":")) + "\n"
+        base_msg["reply_to"] = reply_to_id
 
     # Write to each recipient's inbox
-    for recipient in recipients:
-        recipient_dir = _get_user_dir(atcha_dir, recipient)
-        recipient_inbox = recipient_dir / "messages" / "inbox.jsonl"
+    for user_id, target_dir, space_config, is_cross_space in resolved_recipients:
+        # For cross-space messages, add to_space field
+        msg = dict(base_msg)
+        if is_cross_space:
+            msg["to_space"] = space_config["id"]
+
+        line = json.dumps(msg, separators=(",", ":")) + "\n"
+
+        recipient_user_dir = _get_user_dir(target_dir, user_id)
+        recipient_inbox = recipient_user_dir / "messages" / "inbox.jsonl"
         try:
             with open(recipient_inbox, "a") as f:
                 _ = f.write(line)
         except OSError as e:
-            _error(f"Failed to write to {recipient}'s inbox: {e}")
+            space_suffix = f"@{space_config['name']}" if is_cross_space else ""
+            _error(f"Failed to write to {user_id}{space_suffix}'s inbox: {e}")
 
-    # Write to sender sent log
+    # Write to sender sent log (use base message without to_space for sent log)
+    sent_line = json.dumps(base_msg, separators=(",", ":")) + "\n"
     sender_sent = sender_dir / "messages" / "sent.jsonl"
     try:
         with open(sender_sent, "a") as f:
-            _ = f.write(line)
+            _ = f.write(sent_line)
     except OSError as e:
         print(f"WARNING: Message delivered but sent log failed: {e}", file=sys.stderr)
 
     # Update sender's last_seen timestamp
     _update_last_seen(sender_dir)
 
-    print(json.dumps({"status": "delivered", "to": recipients, "count": len(recipients), "ts": msg["ts"]}))
+    print(json.dumps({"status": "delivered", "to": recipient_names, "count": len(resolved_recipients), "ts": base_msg["ts"]}))
 
 
 # ---------------------------------------------------------------------------
@@ -1747,7 +2681,7 @@ def cmd_send(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 
 
-def cmd_env(_args: argparse.Namespace) -> None:
+def cmd_env(_auth: AuthContext) -> None:
     """Auto-discover .atcha dir and print env exports."""
     atcha_dir = _get_atcha_dir()
     if atcha_dir is None:
@@ -1757,7 +2691,7 @@ def cmd_env(_args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
-# CLI entry point (Task 5.1)
+# CLI entry point
 # ---------------------------------------------------------------------------
 
 
@@ -1769,193 +2703,124 @@ class Parsers(T.NamedTuple):
 
 
 def _build_parser() -> Parsers:
-    """Build and return the argument parser with all subparsers."""
+    """Build the argument parser with the new 'bare plural = list, subcommand = verb' convention.
+
+    Convention: every plural noun lists when invoked bare, verb subcommands for other actions.
+    """
+    # Base auth: --password, --token, --json (shared by all commands)
+    base_auth = argparse.ArgumentParser(add_help=False)
+    _ = base_auth.add_argument("--token", help="User token (or set $ATCHA_TOKEN)")
+    _ = base_auth.add_argument("--password", help="Admin password (or set ATCHA_ADMIN_PASS)")
+    _ = base_auth.add_argument("--json", action="store_true", dest="json_output", help="Output in JSON format")
+
+    # User auth: adds --as-user (only meaningful on user commands like messages, send, profile)
+    user_auth = argparse.ArgumentParser(add_help=False, parents=[base_auth])
+    _ = user_auth.add_argument("--as-user", dest="as_user", help="Act as USER (requires admin auth). USER is a user ID, e.g. usr-a3k9m")
+
     parser = argparse.ArgumentParser(
         prog="atcha",
-        description="Agent Team Chat 󰭹 -- Get in touch with other AI agents and humans on your team",
+        description="Atcha -- Get in touch with other users on your team\n\nConvention: bare plural = list, subcommand = verb",
         epilog="Run 'atcha <command> --help' for command-specific help.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+    _ = parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
 
     sub = parser.add_subparsers(dest="command", required=False, metavar="<command>")
 
-    # ---------- init (top-level) ----------
-    init_parser = sub.add_parser(
-        "init",
-        help="Initialize workspace (first-time setup)",
-        description="Initialize .atcha/ directory and set admin password. Prompts interactively if --password not provided.",
-    )
-    _ = init_parser.add_argument("--password", help="Admin password (prompts if not provided)")
-    _ = init_parser.add_argument("--check", action="store_true", help="Check if initialized (exit 0 if yes, 1 if no)")
-
-    # ---------- create-token (top-level) ----------
-    create_token_parser = sub.add_parser(
-        "create-token",
-        help="Create user token (admin only)",
-        description="Generate authentication token for a user. Requires admin password.",
-    )
-    _ = create_token_parser.add_argument("--password", help="Admin password (or set ATCHA_ADMIN_PASS)")
-    _ = create_token_parser.add_argument("--user", required=True, help="User id or name")
-
-    # ---------- contacts ----------
+    # ---------- contacts (bare = list) ----------
     contacts_parser = sub.add_parser(
         "contacts",
-        help="Discover who is on your team",
-        description="List all contacts or view a specific contact's profile. Excludes yourself by default.",
-        epilog="Examples:\n  atcha contacts\n  atcha contacts maya\n  atcha contacts --include-self",
+        help="List contacts (bare = list, 'show' = view one)",
+        description="List all contacts. Excludes yourself by default. Includes users from federated spaces.",
+        epilog="Examples:\n  atcha contacts\n  atcha contacts show maya@\n  atcha contacts --space frontend\n  atcha contacts --include-self",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        parents=[user_auth],
     )
-    _ = contacts_parser.add_argument("name", nargs="?", help="Contact name to view (optional)")
+    _ = contacts_parser.add_argument("--space", help="Filter by space handle or ID")
     _ = contacts_parser.add_argument("--include-self", action="store_true", help="Include yourself in list")
-    _ = contacts_parser.add_argument("--names-only", action="store_true", help="Only output names, one per line")
     _ = contacts_parser.add_argument("--tags", help="Filter by tags (comma-separated)")
     _ = contacts_parser.add_argument("--full", action="store_true", help="Include all fields (dates, empty values)")
+    contacts_sub = contacts_parser.add_subparsers(dest="contacts_command", required=False, metavar="<subcommand>")
 
-    # ---------- admin ----------
-    admin_parser = sub.add_parser(
-        "admin",
-        help="Administrative commands",
-        description="Administrative commands for managing the atcha system.",
+    # contacts show <address>
+    contacts_show = contacts_sub.add_parser(
+        "show",
+        help="View a specific contact's profile",
+        parents=[user_auth],
     )
-    admin_sub = admin_parser.add_subparsers(dest="admin_command", required=False, metavar="<subcommand>")
+    _ = contacts_show.add_argument("name", help="Contact address (e.g. maya@, maya@space) or user ID")
+    _ = contacts_show.add_argument("--full", action="store_true", help="Include all fields (dates, empty values)")
 
-    # admin password
-    admin_password = admin_sub.add_parser(
-        "password",
-        help="Change admin password",
-        description="Change the admin password.",
-    )
-    _ = admin_password.add_argument("--old", required=True, help="Current password")
-    _ = admin_password.add_argument("--new", required=True, help="New password")
-
-    # admin users
-    admin_users = admin_sub.add_parser(
-        "users",
-        help="Manage users (admin only)",
-        description="List all users or add new users. Requires admin auth.",
-        epilog="Examples:\n  atcha admin users list\n  atcha admin users add --name maya-backend --role 'Backend Engineer'",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    admin_users_sub = admin_users.add_subparsers(dest="users_command", required=False, metavar="<subcommand>")
-
-    # admin users list
-    admin_users_list = admin_users_sub.add_parser(
-        "list",
-        help="List all users",
-        description="List all users in the system.",
-    )
-    _ = admin_users_list.add_argument("--names-only", action="store_true", help="Only output user ids, one per line")
-    _ = admin_users_list.add_argument("--tags", help="Filter by tags (comma-separated)")
-    _ = admin_users_list.add_argument("--full", action="store_true", help="Include all fields (dates, empty values)")
-
-    # admin users add
-    admin_users_add = admin_users_sub.add_parser(
-        "add",
-        help="Add a new user",
-        description="Create a new user account. The user's name IS their id (no role slug). Roles can only be updated by admins.",
-        epilog="Examples:\n  atcha admin users add --name anna --role 'CLI Specialist'  # Creates user 'anna'\n  atcha admin users add --name maya --role 'Backend Engineer'  # Creates user 'maya'",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    _ = admin_users_add.add_argument("--name", required=True, help="User name (becomes their id, e.g. 'anna')")
-    _ = admin_users_add.add_argument("--role", required=True, help="User role (e.g. 'Backend Engineer', admin-only to update)")
-    _ = admin_users_add.add_argument("--status", help="Initial status")
-    _ = admin_users_add.add_argument("--tags", help="Comma-separated tags")
-    _ = admin_users_add.add_argument("--about", help="About description")
-
-    # admin hints
-    _ = admin_sub.add_parser(
-        "hints",
-        help="Show helpful admin hints and reminders",
-        description="Display environment variables, common tasks, and configuration reminders.",
-    )
-
-    # ---------- messages ----------
+    # ---------- messages (bare = list) ----------
     messages_parser = sub.add_parser(
         "messages",
-        help="Check and read messages",
-        description="Check message summary or read full messages. Requires user token.",
-        epilog="Examples:\n  atcha messages check\n  atcha messages read\n  atcha messages read --all",
+        help="List messages (bare = list, 'check'/'read' = subcommands)",
+        description="List messages with previews. Does NOT mark as read.",
+        epilog="Examples:\n  atcha messages\n  atcha messages check\n  atcha messages read msg-abc123",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        parents=[user_auth],
     )
-    _ = messages_parser.add_argument("--token", help="User token (or set $ATCHA_TOKEN)")
-    _ = messages_parser.add_argument("--password", help="Admin password (requires --user)")
-    _ = messages_parser.add_argument("--user", help="User id or name to act as (requires admin auth)")
+    _ = messages_parser.add_argument("--from", dest="from_user", help="Filter by sender address")
+    _ = messages_parser.add_argument("--since", help="Only messages after this ISO timestamp")
+    _ = messages_parser.add_argument("--thread", help="Filter by thread_id")
+    _ = messages_parser.add_argument("--limit", type=int, help="Max messages to return")
+    _ = messages_parser.add_argument("--include-read", action="store_true", help="Include read messages")
+    _ = messages_parser.add_argument("--no-preview", action="store_true", help="Show full content instead of preview")
 
     messages_sub = messages_parser.add_subparsers(dest="messages_command", metavar="<subcommand>")
 
     # messages check
     _ = messages_sub.add_parser(
         "check",
-        help="Check messages summary",
-        description="Show summary of unread messages.",
+        help="Check inbox summary (count + senders)",
+        description="Show summary of unread messages without marking as read.",
     )
 
-    # messages read
+    # messages read <msg-id> [msg-id...]
     messages_read = messages_sub.add_parser(
         "read",
-        help="Read messages and mark as read",
-        description="Read all unread messages as JSONL and mark them as read.",
-        epilog="Examples:\n  atcha messages read --from alice\n  atcha messages read --since 2026-01-30T12:00:00Z",
+        help="Read specific messages and mark as read",
+        description="Read specified messages and mark them as read.",
+        epilog="Examples:\n  atcha messages read msg-abc123\n  atcha messages read msg-abc123 msg-def456",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    _ = messages_read.add_argument("ids", nargs="*", help="Message IDs to read (all unread if omitted)")
-    _ = messages_read.add_argument("--since", help="Only messages after this ISO timestamp")
-    _ = messages_read.add_argument("--from", dest="from_user", help="Only messages from this user")
-    _ = messages_read.add_argument("--include-read", action="store_true", help="Include already-read messages")
-    _ = messages_read.add_argument("--all", action="store_true", help="Alias for --include-read")
+    _ = messages_read.add_argument("ids", nargs="+", help="Message IDs to read (at least one required)")
     _ = messages_read.add_argument("--no-mark", action="store_true", help="Don't mark messages as read")
-
-    # messages list
-    messages_list = messages_sub.add_parser(
-        "list",
-        help="List messages (no side effects)",
-        description="List messages as JSON array with previews. Does NOT mark as read.",
-        epilog="Examples:\n  atcha messages list\n  atcha messages list --limit 5\n  atcha messages list --no-preview",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    _ = messages_list.add_argument("--from", dest="from_user", help="Filter by sender")
-    _ = messages_list.add_argument("--thread", help="Filter by thread_id")
-    _ = messages_list.add_argument("--limit", type=int, help="Max messages to return")
-    _ = messages_list.add_argument("--all", action="store_true", help="Include read messages")
-    _ = messages_list.add_argument("--no-preview", action="store_true", help="Show full content instead of preview")
 
     # ---------- send ----------
     send_parser = sub.add_parser(
         "send",
         help="Send message to contact(s)",
-        description="Send a message to one or more agents. Requires user token.",
-        epilog="Examples:\n  atcha send --to maya \"API is ready\"\n  atcha send --to maya --to alex \"Changes deployed\"\n  atcha send --all \"Standup at 10am\"\n  atcha send --reply-to msg-abc123 \"Agreed\"\n  atcha send --to maya --reply-to msg-abc123 \"Thanks\"",
+        description="Send a message to one or more users. Requires user token.",
+        epilog="Examples:\n  atcha send --to maya@ \"API is ready\"\n  atcha send --to maya@ --to alex@ \"Changes deployed\"\n  atcha send --broadcast \"Standup at 10am\"",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        parents=[user_auth],
     )
-    _ = send_parser.add_argument("--token", help="User token (or set $ATCHA_TOKEN)")
-    _ = send_parser.add_argument("--password", help="Admin password (requires --user)")
-    _ = send_parser.add_argument("--user", help="User id or name to send as (requires admin auth)")
-    _ = send_parser.add_argument("--to", action="append", dest="recipients", help="Recipient id or name (can be repeated)")
-    _ = send_parser.add_argument("--all", action="store_true", help="Send to all contacts (broadcast)")
+    _ = send_parser.add_argument("--to", action="append", dest="recipients", help="Recipient address (can be repeated)")
+    _ = send_parser.add_argument("--broadcast", action="store_true", help="Send to all contacts (broadcast)")
     _ = send_parser.add_argument("--reply-to", help="Message ID to reply to (inherits thread context)")
     _ = send_parser.add_argument("content", help="Message content")
 
-    # ---------- profile ----------
+    # ---------- profile (bare = show self) ----------
     profile_parser = sub.add_parser(
         "profile",
-        help="Update your profile so others know who you are",
-        description="Update your profile fields. Requires user token.",
-        epilog="Examples:\n  atcha profile update --status 'Working on auth'\n  atcha profile update --tags backend,api",
+        help="View or update your profile",
+        description="View your own profile, or update profile fields. Requires user token.",
+        epilog="Examples:\n  atcha profile\n  atcha profile update --status 'Working on auth'",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        parents=[user_auth],
     )
+    _ = profile_parser.add_argument("--full", action="store_true", help="Include all fields (dates, empty values)")
     profile_sub = profile_parser.add_subparsers(dest="profile_command", metavar="<subcommand>")
 
-    # profile update
+    # profile update (no --role or --name -- those are admin-only via admin users update)
     profile_update = profile_sub.add_parser(
         "update",
-        help="Update profile fields",
-        description="Update your profile fields (or another user's with admin auth).",
+        help="Update self-service profile fields",
+        description="Update your profile fields (status, about, tags). Admin-only fields (name, role) use 'admin users update'.",
+        parents=[user_auth],
     )
-    _ = profile_update.add_argument("--token", help="User token (or set $ATCHA_TOKEN)")
-    _ = profile_update.add_argument("--password", help="Admin password (for updating other users)")
-    _ = profile_update.add_argument("--name", help="User id or name to update (default: self, requires admin for others)")
     _ = profile_update.add_argument("--status", help="Set status")
-    _ = profile_update.add_argument("--role", help="Set role (admin only)")
     _ = profile_update.add_argument("--tags", help="Set tags (comma-separated)")
     _ = profile_update.add_argument("--about", help="Set about description")
     _ = profile_update.add_argument("--full", action="store_true", help="Include all fields in output")
@@ -1963,36 +2828,170 @@ def _build_parser() -> Parsers:
     # ---------- whoami ----------
     whoami_parser = sub.add_parser(
         "whoami",
-        help="Print your username",
-        description="Print your username. Requires user token.",
+        help="Print your identity (default: address format)",
+        description="Print your identity. Default: address format (name@). --id: user ID. --name: bare name.",
+        parents=[user_auth],
     )
-    _ = whoami_parser.add_argument("--token", help="User token (or set $ATCHA_TOKEN)")
-    _ = whoami_parser.add_argument("--password", help="Admin password (requires --user)")
-    _ = whoami_parser.add_argument("--user", help="User id or name to act as (requires admin auth)")
+    whoami_group = whoami_parser.add_mutually_exclusive_group()
+    _ = whoami_group.add_argument("--id", action="store_true", dest="show_id", help="Print user ID (usr-xxx)")
+    _ = whoami_group.add_argument("--name", action="store_true", dest="show_name", help="Print bare name")
 
-    # ---------- env (for hooks) ----------
-    _ = sub.add_parser(
-        "env",
+    # ---------- admin ----------
+    admin_parser = sub.add_parser(
+        "admin",
+        help="Administrative commands",
+        description="Administrative commands for managing the atcha system.",
+        parents=[base_auth],
+    )
+    admin_sub = admin_parser.add_subparsers(dest="admin_command", required=False, metavar="<subcommand>")
+
+    # admin init
+    admin_init_parser = admin_sub.add_parser(
+        "init",
+        help="Initialize workspace (first-time setup)",
+        description="Initialize .atcha/ directory and set admin password.",
+    )
+    _ = admin_init_parser.add_argument("--password", help="Admin password (prompts if not provided)")
+    _ = admin_init_parser.add_argument("--json", action="store_true", dest="json_output", help="Output in JSON format")
+
+    # admin status
+    admin_status_parser = admin_sub.add_parser(
+        "status",
+        help="Check if atcha is initialized",
+        description="Check if atcha is initialized. Exits 0 if yes, 1 if no.",
+        parents=[base_auth],
+    )
+    _ = admin_status_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress output (exit code only)")
+
+    # admin envs
+    _ = admin_sub.add_parser(
+        "envs",
         help="Print env exports for hooks",
         description="Auto-discover .atcha directory and print shell export statements.",
+        parents=[base_auth],
     )
+
+    # admin password
+    admin_password = admin_sub.add_parser(
+        "password",
+        help="Change admin password",
+        description="Change the admin password.",
+        parents=[base_auth],
+    )
+    _ = admin_password.add_argument("--new", required=True, help="New password")
+
+    # admin create-token
+    admin_create_token = admin_sub.add_parser(
+        "create-token",
+        help="Create user token (admin only)",
+        description="Generate authentication token for a user.",
+        parents=[base_auth],
+    )
+    _ = admin_create_token.add_argument("--user", required=True, help="User address (e.g. maya@)")
+
+    # admin users (bare = list)
+    admin_users = admin_sub.add_parser(
+        "users",
+        help="Manage users (bare = list all)",
+        description="List all users, or create/update/delete users.",
+        parents=[base_auth],
+    )
+    admin_users_sub = admin_users.add_subparsers(dest="users_command", required=False, metavar="<subcommand>")
+
+    # admin users create (renamed from 'add')
+    admin_users_create = admin_users_sub.add_parser(
+        "create",
+        help="Create a new user",
+        description="Create a new user account.",
+        parents=[base_auth],
+    )
+    _ = admin_users_create.add_argument("--name", required=True, help="User name (e.g. 'maya')")
+    _ = admin_users_create.add_argument("--role", required=True, help="User role (e.g. 'Backend Engineer')")
+    _ = admin_users_create.add_argument("--status", help="Initial status")
+    _ = admin_users_create.add_argument("--tags", help="Comma-separated tags")
+    _ = admin_users_create.add_argument("--about", help="About description")
+
+    # admin users update <address>
+    admin_users_update = admin_users_sub.add_parser(
+        "update",
+        help="Update a user (admin-only fields: name, role)",
+        description="Update a user's profile including admin-only fields.",
+        parents=[base_auth],
+    )
+    _ = admin_users_update.add_argument("address", help="User address (e.g. maya@)")
+    _ = admin_users_update.add_argument("--name", help="New name")
+    _ = admin_users_update.add_argument("--role", help="New role")
+    _ = admin_users_update.add_argument("--status", help="New status")
+    _ = admin_users_update.add_argument("--about", help="New about")
+    _ = admin_users_update.add_argument("--tags", help="New tags (comma-separated)")
+
+    # admin users delete <address>
+    admin_users_delete = admin_users_sub.add_parser(
+        "delete",
+        help="Delete a user",
+        description="Remove a user's directory and token file.",
+        parents=[base_auth],
+    )
+    _ = admin_users_delete.add_argument("address", help="User address (e.g. maya@)")
+
+    # admin hints
+    _ = admin_sub.add_parser(
+        "hints",
+        help="Show helpful admin hints and reminders",
+        parents=[base_auth],
+    )
+
+    # admin spaces (bare = list)
+    admin_spaces = admin_sub.add_parser(
+        "spaces",
+        help="Manage spaces (bare = list all)",
+        description="List local + federated spaces, or update/add/drop.",
+        parents=[base_auth],
+    )
+    admin_spaces_sub = admin_spaces.add_subparsers(dest="spaces_command", required=False, metavar="<subcommand>")
+
+    # admin spaces update
+    admin_spaces_update_parser = admin_spaces_sub.add_parser(
+        "update",
+        help="Update local space name/description",
+        parents=[base_auth],
+    )
+    _ = admin_spaces_update_parser.add_argument("--name", dest="new_space_name", help="New name for the space")
+    _ = admin_spaces_update_parser.add_argument("--description", help="Set space description")
+
+    # admin spaces add
+    admin_spaces_add = admin_spaces_sub.add_parser(
+        "add",
+        help="Register a federated space",
+        parents=[base_auth],
+    )
+    _ = admin_spaces_add.add_argument("path", help="Path to remote .atcha/ directory (or its parent)")
+    _ = admin_spaces_add.add_argument("--force", action="store_true", help="Proceed despite handle collision")
+
+    # admin spaces drop
+    admin_spaces_drop = admin_spaces_sub.add_parser(
+        "drop",
+        help="Unregister a federated space",
+        parents=[base_auth],
+    )
+    _ = admin_spaces_drop.add_argument("identifier", help="Space handle or ID to remove")
 
     return Parsers(main=parser, admin=admin_parser)
 
 
 def main() -> None:
-    global _cli_token, _cli_password, _cli_user
-
     parsers = _build_parser()
 
     # ---------- Parse and dispatch ----------
     args = parsers.main.parse_args()
 
-    # Set global auth from CLI if provided
-    # Priority: --password > --token > ATCHA_TOKEN
-    _cli_token = T.cast(str | None, getattr(args, "token", None))
-    _cli_password = T.cast(str | None, getattr(args, "password", None))
-    _cli_user = T.cast(str | None, getattr(args, "user", None))
+    # Build auth context from parsed args (replaces globals)
+    auth = AuthContext(
+        token=T.cast(str | None, getattr(args, "token", None)),
+        password=T.cast(str | None, getattr(args, "password", None)),
+        as_user=T.cast(str | None, getattr(args, "as_user", None)),
+        json_output=T.cast(bool, getattr(args, "json_output", False)),
+    )
 
     if args.command is None:
         parsers.main.print_help()
@@ -2000,36 +2999,90 @@ def main() -> None:
 
     command = T.cast(str, args.command)
 
-    if command == "init":
-        cmd_init(args)
+    # --- contacts ---
+    if command == "contacts":
+        contacts_sub = T.cast(str | None, getattr(args, "contacts_command", None))
+        if contacts_sub == "show":
+            cmd_users_get(auth, args)
+        else:
+            # bare 'contacts' = list
+            cmd_users_list(auth, args)
 
-    elif command == "create-token":
-        cmd_create_token(args)
+    # --- messages ---
+    elif command == "messages":
+        msg_sub = T.cast(str | None, getattr(args, "messages_command", None))
+        if msg_sub == "check":
+            cmd_messages_check(auth)
+        elif msg_sub == "read":
+            cmd_messages_read(auth, args)
+        else:
+            # bare 'messages' = list
+            cmd_messages_list(auth, args)
 
+    # --- send ---
+    elif command == "send":
+        cmd_send(auth, args)
+
+    # --- profile ---
+    elif command == "profile":
+        cmd_profile(auth, args)
+
+    # --- whoami ---
+    elif command == "whoami":
+        cmd_whoami(auth, args)
+
+    # --- admin ---
     elif command == "admin":
-        admin_command = T.cast(str | None, args.admin_command)
+        admin_command = T.cast(str | None, getattr(args, "admin_command", None))
         if admin_command is None:
             parsers.admin.print_help()
             sys.exit(0)
-        admin_cmd_map: dict[str, T.Callable[[argparse.Namespace], None]] = {
-            "password": cmd_admin_password,
-            "users": cmd_admin_users,
-            "hints": cmd_admin_hints,
-        }
-        admin_cmd_map[admin_command](args)
 
-    elif command == "messages":
-        cmd_messages(args)
+        if admin_command == "status":
+            quiet = T.cast(bool, getattr(args, "quiet", False))
+            if quiet:
+                # Exit code only — no output
+                existing_dir = _get_atcha_dir()
+                if existing_dir is not None and (existing_dir / "admin.json").exists():
+                    sys.exit(0)
+                else:
+                    sys.exit(1)
+            else:
+                cmd_status(auth)
+        elif admin_command == "init":
+            cmd_init(args, auth)
+        elif admin_command == "envs":
+            cmd_env(auth)
+        elif admin_command == "password":
+            cmd_admin_password(auth, args)
+        elif admin_command == "create-token":
+            cmd_create_token(auth, args)
+        elif admin_command == "hints":
+            cmd_admin_hints(auth)
 
-    else:
-        cmd_map: dict[str, T.Callable[[argparse.Namespace], None]] = {
-            "contacts": cmd_contacts,
-            "profile": cmd_profile,
-            "send": cmd_send,
-            "whoami": cmd_whoami,
-            "env": cmd_env,
-        }
-        cmd_map[command](args)
+        elif admin_command == "users":
+            users_sub = T.cast(str | None, getattr(args, "users_command", None))
+            if users_sub == "create":
+                cmd_users_add(auth, args)
+            elif users_sub == "update":
+                cmd_admin_users_update(auth, args)
+            elif users_sub == "delete":
+                cmd_admin_users_delete(auth, args)
+            else:
+                # bare 'admin users' = list
+                cmd_admin_users_list(auth)
+
+        elif admin_command == "spaces":
+            spaces_sub = T.cast(str | None, getattr(args, "spaces_command", None))
+            if spaces_sub == "update":
+                cmd_admin_spaces_update(auth, args)
+            elif spaces_sub == "add":
+                cmd_admin_federated_add(auth, args)
+            elif spaces_sub == "drop":
+                cmd_admin_federated_remove(auth, args)
+            else:
+                # bare 'admin spaces' = list
+                cmd_admin_spaces_list(auth)
 
 
 if __name__ == "__main__":

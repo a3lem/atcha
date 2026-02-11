@@ -2,13 +2,13 @@
 
 ## What this is
 
-A file-based messaging system for parallel Claude Code sessions. Agents running in separate git worktrees can send each other messages through JSONL files on the filesystem. No MCP servers, no daemons, no databases.
+A file-based messaging system for parallel Claude Code sessions. Users running in separate git worktrees can send each other messages through JSONL files on the filesystem. No MCP servers, no daemons, no databases.
 
 The Python CLI (`atcha`) provides a hierarchical command structure with token-based authentication. Claude Code commands handle higher-level logic like name generation and message formatting.
 
 ## Architecture
 
-A `.atcha/` directory lives at the project root and contains admin config, tokens, and agent data. Agents authenticate via tokens stored in `$ATCHA_TOKEN`.
+A `.atcha/` directory lives at the project root and contains admin config, tokens, and user data. Users authenticate via tokens stored in `$ATCHA_TOKEN`.
 
 Each user gets a directory under `.atcha/users/` with their profile and messages. Sending a message means appending a JSON line directly to the recipient's `inbox.jsonl`. A PostToolUse hook checks for new messages after every tool call.
 
@@ -46,19 +46,25 @@ Each user gets a directory under `.atcha/users/` with their profile and messages
 
 The filesystem is the registry — a user exists if their directory exists.
 
-### User identifiers
+### User identifiers and addresses
 
 Each user has two identifiers:
-- **name**: The user's unique name (e.g., `maya`), always unique across all users
+- **name**: The user's unique name (e.g., `maya`), always unique within a space
 - **id**: Random alphanumeric identifier (e.g., `usr-a3k9m`), auto-generated and immutable
 
-The name is the primary identifier for human-readable commands. The id is used as the directory name and is randomly generated when the user is created.
+The **address** is the canonical way to reference users in CLI commands: `name@space` for cross-space, `name` for local. Behind the scenes, addresses resolve to user IDs.
 
-Both can be used interchangeably in CLI commands:
+Address formats:
+- `maya@` — explicitly local
+- `maya@engineering` — user in the `engineering` space (cross-space)
+
+Bare names (e.g. `maya`) are rejected in admin update/delete commands — must use address form (`maya@`) or user ID. Other commands (`contacts show`, `send --to`) accept bare names for convenience.
+
 ```bash
-atcha contacts maya        # by name (preferred)
-atcha contacts usr-a3k9m   # by id
-atcha send --to maya "Hello"
+atcha contacts show maya@           # local lookup
+atcha contacts show maya@engineering  # cross-space lookup
+atcha send --to maya@ "Hello"
+atcha send --to maya@engineering "Hello from here"
 ```
 
 Examples:
@@ -78,16 +84,16 @@ Examples:
 
 ### Message flow
 
-1. Agent A (authenticated via token) sends a message to alex
+1. User A (authenticated via token) sends a message to alex
 2. The CLI uses the token to identify the sender and appends to `alex/messages/inbox.jsonl` (using alex's user directory)
 3. A copy goes to sender's `messages/sent.jsonl` atomically
-4. On agent B's next tool call, the `check-inbox.sh` hook fires, sees the new message, and prints it to stdout
-5. Agent B runs `/check-messages` (which uses `messages read`) to read and mark messages as read
+4. On user B's next tool call, the `check-inbox.sh` hook fires, sees the new message, and prints it to stdout
+5. User B runs `/check-messages` (which uses `messages read`) to read and mark messages as read
 
 ### Env vars
 
 - `ATCHA_DIR` — absolute path to `.atcha/` directory. Auto-discovered by SessionStart hook.
-- `ATCHA_TOKEN` — authentication token for the current agent.
+- `ATCHA_TOKEN` — authentication token for the current user.
 - `ATCHA_ADMIN_PASS` — admin password (for admin operations without `--password`).
 
 When the package is installed (`uv sync` or `pip install -e .`), use `atcha` directly.
@@ -96,80 +102,106 @@ When the package is installed (`uv sync` or `pip install -e .`), use `atcha` dir
 
 The CLI provides a hierarchical structure with token-based authentication.
 
-### Authentication options
+### Command tree
 
-**Admin operations** (create agents, mint tokens):
+```
+atcha
+│
+│   Auth flags (on user commands):
+│     --token <token>       user auth (or $ATCHA_TOKEN)
+│     --password <pw>       admin auth (or $ATCHA_ADMIN_PASS)
+│     --as-user <user-id>   act as USER (admin only, user commands only). USER is a user ID (e.g. usr-a3k9m)
+│     --json                machine-readable output
+│
+├── contacts [--include-self] [--tags=x] [--full]
+│   └── show <id-or-address> [--full]
+│
+├── messages [--from=address] [--since=date] [--limit=N] [--include-read] [--no-preview]
+│   ├── check
+│   └── read <msg-id> [msg-id...] [--no-mark]
+│
+├── send --to <address> "content"
+├── send --broadcast "content"
+│
+├── profile
+│   └── update [--status <text>] [--about <text>] [--tags <csv>]
+│
+├── whoami [--id] [--name]
+│
+├── admin
+│   ├── status [-q/--quiet]
+│   ├── init [--password <pw>]
+│   ├── create-token --user <address>
+│   ├── password --new <pw>
+│   ├── envs
+│   ├── users
+│   │   ├── create --name <n> --role <r> [--status] [--about] [--tags]
+│   │   ├── update <address> [--name] [--role] [--status] [--about] [--tags]
+│   │   └── delete <address>
+│   └── spaces
+│       ├── update [--name] [--description]
+│       ├── add <dir>
+│       └── drop <id>
+```
+
+Design rules:
+- Bare plural = list (e.g. `contacts`, `messages`, `admin users`, `admin spaces`)
+- Subcommands = other verbs on that collection (e.g. `contacts show`, `messages read`)
+- Bare `profile` = show self
+- `whoami` defaults to address; `--id` returns `usr-xxx`; `--name` returns bare name
+- `admin status` prints initialization state; `-q`/`--quiet` suppresses output (exit code only)
+
+### Authentication
+
+**Admin operations** (create users, mint tokens):
 - `--password <pw>` or `$ATCHA_ADMIN_PASS`
 
-**Agent operations** (profile, inbox, send):
+**User operations** (profile, messages, send):
 - `--token <token>` or `$ATCHA_TOKEN`
 
 Priority: password/ATCHA_ADMIN_PASS > token/ATCHA_TOKEN
 
-### Admin impersonation
-
-Commands that self-identify (messages, send) accept `--user <name>` with admin auth:
+**Acting as a user**: `--as-user <user-id>` with admin auth on user commands. Takes a user ID (e.g. `usr-a3k9m`), not an address.
 
 ```bash
 # Check alice's inbox as admin
-atcha messages --password=secret --user=alice check
+atcha messages --password=secret --as-user=usr-a3k9m check
 
 # Send from alice to bob as admin
-atcha send --password=secret --user=alice --to bob "Hello"
+atcha send --password=secret --as-user=usr-a3k9m --to bob@ "Hello"
 
 # Update alice's profile as admin
-atcha profile update --password=secret --name=alice --status="On vacation"
+atcha profile update --password=secret --as-user=usr-a3k9m --status="On vacation"
 ```
 
-### Setup commands (require admin password)
+### Field permissions
 
-| Command | Arguments | Output | Purpose |
-|---------|-----------|--------|---------|
-| `init` | `[--password <pw>]` | status | First-time setup, creates `.atcha/`. Prompts if no password |
-| `init` | `--check` | status | Check if initialized (exit 0 if yes, 1 if no). Useful in hooks |
-| `create-token` | `--user <name>` | token | Create user token |
-| `admin password` | `--old <pw> --new <pw>` | status | Change admin password |
+- **Self-service** (`profile update`): status, about, tags
+- **Admin-only** (`admin users create/update`): name, role
+- Admin commands can also set status, about, tags
 
-### Contact and profile commands
+### Messages
 
-| Command | Arguments | Output | Purpose |
-|---------|-----------|--------|---------|
-| `contacts` | `[--names-only] [--include-self] [--tags=x] [--full]` | JSON array | List all contacts (excludes self by default) |
-| `contacts` | `<name> [--full]` | JSON | View a contact's profile |
-| `admin users add` | `--name <name> --role <role>` + optional flags | JSON | Add new user (admin only) |
-| `profile update` | `[--name <name>] --status/--role/--tags/--about` | JSON | Update profile |
+- `messages` lists messages (no side effects, no marking as read)
+- `messages check` returns a digest/summary (count + senders)
+- `messages read <msg-id> [msg-id...]` reads specific messages (at least one ID required) and marks them as read; `--no-mark` prevents this
+- Filters: `--since` (ISO timestamp), `--from` (sender address), `--include-read`, `--limit`
+- `--no-preview` shows full content instead of truncated preview
 
-Notes:
-- `contacts` with no arguments lists all users, excluding self by default. Use `--include-self` to include yourself.
-- `contacts <name>` shows a specific user's profile.
-- `--full` includes all fields (dates and empty values, hidden by default).
-- `profile update` without `--name` updates your own profile (requires token). With `--name`, requires admin auth.
+### JSON output
 
-### Message commands (require agent token)
+Most commands support `--json` for machine-parsable output:
 
-| Command | Arguments | Output | Purpose |
-|---------|-----------|--------|---------|
-| `messages check` | — | summary | Check inbox (count + senders) |
-| `messages list` | `[--from=user] [--thread=id] [--limit=N] [--all] [--no-preview]` | JSON array | List messages with previews (no side effects) |
-| `messages read` | `[IDs...] [--since=TS] [--from=user] [--include-read] [--no-mark]` | JSONL | Read messages, mark as read |
-| `send` | `--to <name> <content>` | JSON | Send message |
+| Command | Default output | `--json` output |
+|---------|---------------|-----------------|
+| `messages check` | English text | `{"count": N, "senders": {"maya": 2}}` |
+| `messages read` | JSONL (one per line) | JSON array |
+| `admin init` | "Initialized .atcha/ at ..." | `{"status": "initialized", "path": "..."}` |
+| `admin password` | "Password updated" | `{"status": "updated"}` |
+| `whoami` | plain text address | `{"address": "maya@"}` |
+| `admin status` | "Atcha initialized" / "Not initialized" | `{"initialized": true/false}` |
 
-Notes:
-- `messages list` returns JSON array with `preview` field (50 chars + "..."). Use `--no-preview` for full `content`.
-- `messages list` does NOT mark messages as read (no side effects).
-- `messages read` marks messages as read. Use `--no-mark` to prevent this.
-- `messages read [IDs]` reads only specific messages by ID.
-- `messages read` excludes the `to` field by default (it's redundant). When admin impersonates, `to` is included.
-- Filters: `--since` (ISO timestamp), `--from` (sender agent name), `--include-read` (include already-read messages).
-- Message field: `content`.
-
-### Utility commands
-
-| Command | Arguments | Output | Purpose |
-|---------|-----------|--------|---------|
-| `whoami` | — | text | Print your username (requires token) |
-| `env` | — | shell exports | Auto-discover, print exports |
-| `prompt` | — | text | Full CLI reference + identity (for SessionStart) |
+Commands already outputting JSON (`contacts`, `messages`, `send`, `profile`) are unchanged by `--json`.
 
 ### Error format
 
@@ -187,9 +219,9 @@ The Claude Code skill in `extras/claude-plugin/skills/atcha/` provides a simplif
 
 ### Why token-based auth
 
-The previous trust-the-LLM model relied on the agent remembering to use `--as <name>` flags. Token-based auth is more robust:
+The previous trust-the-LLM model relied on the agent remembering to use identity flags. Token-based auth is more robust:
 - Identity is cryptographically verified
-- No risk of accidentally impersonating another agent
+- No risk of accidentally acting as another user
 - Tokens can be revoked by deleting the hash file
 - Compatible with multi-agent orchestration
 
@@ -211,7 +243,7 @@ An MCP server would give cleaner tool APIs and in-memory state, but it introduce
 
 ### Why the hook marks messages as read
 
-The `check-inbox.sh` hook uses `messages read` which marks messages as read. This is deliberate — agents should see each message once. Use `messages check` for a summary without marking as read, or `messages list` for full details without marking as read.
+The `check-inbox.sh` hook uses `messages check` to detect new messages, then `messages` (list) to get IDs, then `messages read` to read and mark them. Users see each message once. Use `messages check` for a summary without marking as read, or bare `messages` for full details without marking as read.
 
 ## Components
 
@@ -233,37 +265,36 @@ The `check-inbox.sh` hook uses `messages read` which marks messages as read. Thi
 ```bash
 # Install
 git clone <repo-url>
-cd agent-team-mail
+cd atcha-chat
 uv tool install -e .
 
 # Initialize (first time, will prompt for password)
-atcha init
+atcha admin init
 # Or with password directly:
-atcha init --password mypassword
+atcha admin init --password mypassword
 
 # Set admin password for subsequent commands
 export ATCHA_ADMIN_PASS=mypassword
 
 # Create a user
-atcha admin users add --name maya --role "Backend Engineer"
+atcha admin users create --name maya --role "Backend Engineer"
 
 # Get user token and use it
-export ATCHA_TOKEN=$(atcha create-token --user maya)
+export ATCHA_TOKEN=$(atcha admin create-token --user maya@)
 
 # Check your identity
 atcha whoami
-atcha contacts $(atcha whoami)
 
-# List users
+# List contacts
 atcha contacts
 
-# View a specific user
-atcha contacts alex
+# View a specific contact
+atcha contacts show maya@
 
 # Send a message
-atcha send --to alex "API is ready"
+atcha send --to alex@ "API is ready"
 
 # Check inbox
 atcha messages check
-atcha messages read
+atcha messages read msg-xxxxx
 ```

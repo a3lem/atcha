@@ -1,6 +1,6 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "atcha",
+  "name": "atcha-marketplace",
   "owner": {
     "name": "Adriaan",
     "email": "a3lem@pm.me"

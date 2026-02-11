@@ -12,33 +12,26 @@ atcha init --password <secure-password>
 export ATCHA_ADMIN_PASS=<secure-password>
 
 # 3. Verify initialization
-atcha init --check  # Should print "Atcha initialized"
+atcha admin status  # Should print "Atcha initialized"
 ```
 
 ## User Management
 
 ### Creating Users
 
-The `--name` argument accepts either a short name or full id:
-
 ```bash
-# Option 1: Provide short name (recommended)
 atcha admin users add --name anna --role "CLI Specialist"
-# Creates: id="anna-cli-specialist", name="anna"
+# Creates: id="usr-XXXXX" (random), name="anna"
 
 atcha admin users add --name maya --role "Backend Engineer" --tags=backend,api
-# Creates: id="maya-backend-engineer", name="maya"
-
-# Option 2: Provide full id
-atcha admin users add --name kai-devops-lead --role "DevOps Lead"
-# Creates: id="kai-devops-lead", name="kai"
+# Creates: id="usr-XXXXX" (random), name="maya"
 ```
 
-**User ID Format Rules:**
-- Auto-generated from: `{short-name}-{role-slug}`
-- Role slug: lowercase, spaces→dashes, alphanumeric only
-- Example: "CLI Specialist" → "cli-specialist"
-- Short name must be unique across all users
+**User ID Format:**
+- Random alphanumeric with `usr-` prefix (e.g., `usr-a3k9m`)
+- Auto-generated and immutable
+- Users are referenced by name in commands, not by ID
+- Name must be unique across all users
 
 **Additional Options:**
 ```bash
@@ -53,17 +46,17 @@ atcha admin users add \
 ### Listing Users
 
 ```bash
-# Full details (JSON)
-atcha admin users list
+# Full details (JSON) — use contacts with admin auth
+atcha contacts --include-self
 
 # Names only (one per line)
-atcha admin users list --names-only
+atcha contacts --include-self --names-only
 
 # Filter by tags
-atcha admin users list --tags=backend,api
+atcha contacts --include-self --tags=backend,api
 
 # Include all fields
-atcha admin users list --full
+atcha contacts --include-self --full
 ```
 
 ### Viewing User Profiles
@@ -71,8 +64,7 @@ atcha admin users list --full
 ```bash
 # View specific user
 atcha contacts <name-or-id>
-atcha contacts anna                   # by short name
-atcha contacts anna-cli-specialist    # by full id
+atcha contacts anna                   # by name
 
 # Full details including dates
 atcha contacts anna --full
@@ -86,8 +78,7 @@ Tokens are deterministically derived from admin password + user id + salt. Same 
 
 ```bash
 # Create/regenerate user token
-atcha create-token --user anna
-atcha create-token --user anna-cli-specialist  # same result
+atcha admin create-token --user anna
 
 # Output: a3k9m (5-character alphanumeric)
 ```
@@ -102,12 +93,12 @@ atcha create-token --user anna-cli-specialist  # same result
 
 ```bash
 # Save to variable for distribution
-TOKEN=$(atcha create-token --user anna)
+TOKEN=$(atcha admin create-token --user anna)
 echo "Your atcha token: $TOKEN"
 
 # Or create and immediately set for testing
-export ATCHA_TOKEN=$(atcha create-token --user anna)
-atcha whoami  # Should print "anna-cli-specialist"
+export ATCHA_TOKEN=$(atcha admin create-token --user anna)
+atcha whoami  # Should print "anna"
 ```
 
 ## Security
@@ -115,12 +106,12 @@ atcha whoami  # Should print "anna-cli-specialist"
 ### Changing Admin Password
 
 ```bash
-atcha admin password --old <current> --new <new-password>
+atcha admin password --password <current> --new <new-password>
 ```
 
 **After password change:**
 - All existing user tokens become invalid
-- Regenerate all user tokens with `atcha create-token --user <name>`
+- Regenerate all user tokens with `atcha admin create-token --user <name>`
 - This is because tokens are derived from the admin password
 
 ### Token Security
@@ -149,8 +140,8 @@ atcha admin users add --name anna --role "CLI Specialist"
 atcha admin users add --name maya --role "Backend Engineer"
 
 # Generate tokens
-TOKEN_ANNA=$(atcha create-token --user anna)
-TOKEN_MAYA=$(atcha create-token --user maya)
+TOKEN_ANNA=$(atcha admin create-token --user anna)
+TOKEN_MAYA=$(atcha admin create-token --user maya)
 ```
 
 ### Per-Worktree Configuration
@@ -173,7 +164,7 @@ export ATCHA_TOKEN=$TOKEN_MAYA
 
 ```bash
 # List all users
-atcha admin users list
+atcha contacts --include-self
 
 # Check directory structure
 ls -la .atcha/
@@ -188,13 +179,13 @@ cat .atcha/admin.json
 
 **"Admin not initialized"**
 ```bash
-atcha init --check  # Verify initialization
-# If returns 1, run: atcha init --password <password>
+atcha admin status  # Verify initialization
+# If returns 1, run: atcha admin init --password <password>
 ```
 
 **"Name 'X' is already used"**
 ```bash
-atcha admin users list --names-only  # See all names
+atcha contacts --include-self --names-only  # See all names
 # Choose a different short name, e.g., anna2, anna-v2
 ```
 
@@ -211,7 +202,7 @@ atcha admin users list --names-only  # See all names
 **User can't authenticate**
 ```bash
 # Regenerate token
-atcha create-token --user <name>
+atcha admin create-token --user <name>
 # Provide new token to user
 ```
 
@@ -248,7 +239,7 @@ If you have an old `.atcha/agents/` directory, it will be automatically migrated
    - Regenerate if compromised
 
 4. **Monitoring**
-   - Periodically review `atcha admin users list`
+   - Periodically review `atcha contacts --include-self`
    - Check `last_seen` timestamps
    - Remove inactive users if needed
 
@@ -260,12 +251,12 @@ atcha init --password <pw>
 export ATCHA_ADMIN_PASS=<pw>
 
 # Users
-atcha admin users list
+atcha contacts --include-self
 atcha admin users add --name <name> --role "<Role>"
-atcha create-token --user <name>
+atcha admin create-token --user <name>
 
 # Security
-atcha admin password --old <old> --new <new>
+atcha admin password --password <old> --new <new>
 
 # Help
 atcha admin hints

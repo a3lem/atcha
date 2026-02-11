@@ -1,6 +1,6 @@
 ---
 locked: false
-status: active
+status: completed
 ---
 
 # Requirements: Federation
