@@ -14,7 +14,7 @@ Authentication uses short random tokens stored as hashes. Set `$ATCHA_TOKEN` to 
 
 ```bash
 git clone <repo-url>
-cd agent-team-mail
+cd atcha-chat
 uv tool install -e .
 ```
 
@@ -114,22 +114,23 @@ The agent will create the users with appropriate names, roles, and descriptions.
 atcha
 ├── contacts [--include-self] [--tags=x] [--full]
 │   └── show <id-or-address> [--full]
-├── messages [--from=address] [--since=date] [--limit=N] [--include-read] [--no-preview]
+├── messages [--from=address] [--since=date] [--limit=N] [--include-read] [--no-preview] [--id=msg-id]
 │   ├── check
-│   └── read <msg-id> [msg-id...] [--no-mark]
-├── send --to <address> / --broadcast "content"
+│   └── read <msg-id> [msg-id...] [--no-mark] [-q/--quiet]
+├── send --to <address> / --broadcast / --reply-to <msg-id> "content"
 ├── profile
 │   └── update [--status] [--about] [--tags]
 ├── whoami [--id] [--name]
-├── status [--quiet]
 ├── admin
 │   ├── init [--password <pw>]
+│   ├── status [-q/--quiet]
 │   ├── create-token <address>
 │   ├── password --new <pw>
 │   ├── envs
+│   ├── hints
 │   ├── users
 │   │   ├── create --name <n> --role <r> [--status] [--about] [--tags]
-│   │   ├── update <address> [--name] [--role] [--status] [--about] [--tags]
+│   │   ├── update <address> [--status] [--about] [--tags]
 │   │   └── delete <address>
 │   └── spaces
 │       ├── update [--name] [--description]
@@ -157,7 +158,7 @@ atcha admin create-token <address>
 # Manage users
 atcha admin users                              # list all users
 atcha admin users create --name maya --role "Backend Engineer"
-atcha admin users update maya@ --role "Lead Engineer"
+atcha admin users update maya@ --status "On vacation"
 atcha admin users delete maya@
 
 # Manage spaces
@@ -184,7 +185,7 @@ atcha profile update --status="Working on auth" --tags=backend,api
 
 # Check identity
 atcha whoami                  # address (maya@)
-atcha whoami --id             # user ID (usr-xxxxx)
+atcha whoami --id             # user ID (maya-backend-engineer)
 atcha whoami --name           # bare name (maya)
 
 # Check inbox
@@ -202,31 +203,33 @@ atcha send --broadcast "Team standup in 5 min"
 ```
 .atcha/
 ├── admin.json              # {"password_hash": "...", "salt": "..."}
+├── space.json              # {"id": "spc-xxxxx", "name": "project-name", ...}
+├── federation.local.json   # {"spaces": [...]} (federated space registry)
 ├── tokens/
 │   ├── _admin              # Hash of admin token
-│   └── usr-a3k9m           # Hash of user token
+│   └── maya-backend-engineer  # Hash of user token (filename = user ID)
 └── users/
-    ├── usr-a3k9m/
+    ├── maya-backend-engineer/
     │   ├── profile.json
     │   └── messages/
     │       ├── inbox.jsonl
     │       ├── sent.jsonl
     │       └── state.json
-    └── usr-7x2pq/
+    └── alex-frontend-dev/
         └── ...
 ```
 
 ## User identifiers
 
 Each user has three ways to be referenced:
-- **id**: `usr-2fg4` — immutable, globally unique
+- **id**: `maya-backend-engineer` — derived from `{name}-{slugify(role)}`, immutable
 - **name**: `maya` — unique within a space, human-readable
 - **address**: `maya@` (local) or `maya@engineering` (cross-space)
 
-Commands require an address or ID — bare names are rejected:
+Commands accept an address or ID:
 ```bash
-atcha contacts show maya@           # by address
-atcha contacts show usr-2fg4        # by id
+atcha contacts show maya@                    # by address
+atcha contacts show maya-backend-engineer    # by id
 atcha send --to maya@ "Hello"
 ```
 
