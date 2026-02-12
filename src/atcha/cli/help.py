@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import os
 import shutil
 import sys
 import typing as T
@@ -26,6 +27,68 @@ import typing as T
 _AUTH_DESTS: frozenset[str] = frozenset({
     "token", "password", "json_output", "as_user",
 })
+
+
+# ---------------------------------------------------------------------------
+# Color theme — matches the Python 3.14 argparse palette so that custom
+# and standard help pages look consistent.
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _Theme:
+    """ANSI color codes for help output."""
+
+    prog: str       # program name
+    heading: str    # section headers (Commands:, Options:, …)
+    action: str     # command names in the tree
+    label: str      # positional args / metavars
+    option: str     # --flags
+    reset: str
+
+
+_COLOR = _Theme(
+    prog="\x1b[1;35m",       # bold magenta
+    heading="\x1b[1;34m",    # bold blue
+    action="\x1b[32m",       # green
+    label="\x1b[33m",        # yellow
+    option="\x1b[36m",       # cyan
+    reset="\x1b[0m",
+)
+
+_NO_COLOR = _Theme(prog="", heading="", action="", label="", option="", reset="")
+
+
+def _get_theme() -> _Theme:
+    """Return a colored theme when stdout is a color-capable TTY, else no-op.
+
+    Delegates to CPython's ``_colorize.can_colorize`` when available (3.13+),
+    falling back to a manual ``isatty`` / ``NO_COLOR`` check otherwise.
+    """
+    try:
+        from _colorize import can_colorize  # type: ignore[import-not-found]  # CPython internal
+        return _COLOR if can_colorize() else _NO_COLOR
+    except ImportError:
+        if os.environ.get("NO_COLOR"):
+            return _NO_COLOR
+        if hasattr(sys.stdout, "isatty") and sys.stdout.isatty():
+            return _COLOR
+        return _NO_COLOR
+
+
+def _color_flag(flag: str, t: _Theme) -> str:
+    """Colorize a single key-flag string (e.g. ``'<name>'`` or ``'--to ADDR'``)."""
+    if not t.reset:  # no-color fast path
+        return flag
+    if flag.startswith("<"):
+        return f"{t.label}{flag}{t.reset}"
+    if flag.startswith("-"):
+        parts = flag.split(" ", 1)
+        colored = f"{t.option}{parts[0]}{t.reset}"
+        if len(parts) > 1:
+            colored += f" {t.label}{parts[1]}{t.reset}"
+        return colored
+    return flag
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +236,7 @@ def _render_lines(
     max_left: int,
     width: int,
     collapse: frozenset[str],
+    t: _Theme,
 ) -> list[str]:
     """Render command nodes as indented lines with aligned descriptions."""
     lines: list[str] = []
@@ -180,20 +244,32 @@ def _render_lines(
     for node in nodes:
         prefix = _INDENT * depth
         flag_str = " ".join(node.key_flags)
-        left = f"{prefix}{node.name} {flag_str}" if flag_str else f"{prefix}{node.name}"
+        # Plain-text left column — used for width/padding calculations.
+        plain_left = f"{prefix}{node.name} {flag_str}" if flag_str else f"{prefix}{node.name}"
 
-        padding = max_left - len(left) + _GAP
-        line = f"{left}{' ' * padding}{node.help_text}"
+        # Colored variant — ANSI codes don't affect alignment because
+        # padding is derived from the plain-text width above.
+        colored_name = f"{t.action}{node.name}{t.reset}"
+        colored_flags = " ".join(_color_flag(f, t) for f in node.key_flags)
+        colored_left = (
+            f"{prefix}{colored_name} {colored_flags}" if colored_flags
+            else f"{prefix}{colored_name}"
+        )
 
-        if len(line) > width:
-            line = line[: width - 3] + "..."
+        padding = max_left - len(plain_left) + _GAP
 
-        lines.append(line)
+        # Truncate the help text (never the colored left column) to fit.
+        help_text = node.help_text
+        avail = width - len(plain_left) - padding
+        if avail > 3 and len(help_text) > avail:
+            help_text = help_text[: avail - 3] + "..."
+
+        lines.append(f"{colored_left}{' ' * padding}{help_text}")
 
         # Recurse unless this command is collapsed
         if node.children and node.name not in collapse:
             lines.extend(
-                _render_lines(node.children, depth + 1, max_left, width, collapse)
+                _render_lines(node.children, depth + 1, max_left, width, collapse, t)
             )
 
     return lines
@@ -216,27 +292,28 @@ def format_tree_help(
     """
     term_width = width or shutil.get_terminal_size().columns
     _collapse = collapse if collapse is not None else frozenset({"admin"})
+    t = _get_theme()
 
     parts: list[str] = []
 
     # Header
-    parts.append(f"{prog} v{version} -- {description}")
+    parts.append(f"{t.prog}{prog}{t.reset} v{version} -- {description}")
     parts.append("")
-    parts.append(f"Usage: {prog} <command> [options]")
+    parts.append(f"{t.heading}Usage:{t.reset} {t.prog}{prog}{t.reset} <command> [options]")
     parts.append("")
-    parts.append("Commands:")
+    parts.append(f"{t.heading}Commands:{t.reset}")
 
     max_left = min(
         _compute_max_left(root.children, 1, _collapse), 50
     )
-    lines = _render_lines(root.children, 1, max_left, term_width, _collapse)
+    lines = _render_lines(root.children, 1, max_left, term_width, _collapse, t)
     parts.extend(lines)
 
     # Footer
     parts.append("")
-    parts.append("Auth: --token TOKEN (user) | --password PW (admin) [--json]")
+    parts.append(f"{t.heading}Auth:{t.reset} --token TOKEN (user) | --password PW (admin) [--json]")
     parts.append("Structured output: Need JSON? All commands provide a --json option")
-    parts.append(f"Run '{prog} <command> --help' for command-specific help.")
+    parts.append(f"Run '{t.prog}{prog}{t.reset} <command> --help' for command-specific help.")
 
     return "\n".join(parts)
 
@@ -300,24 +377,25 @@ def format_subtree_help(
     explicitly asked for this command's help).
     """
     term_width = width or shutil.get_terminal_size().columns
+    t = _get_theme()
 
     parts: list[str] = []
 
     # Header — prefer the parser's description (longer) over
     # help_text (the one-liner from the parent's add_parser).
     header_text = node.parser.description or node.help_text
-    parts.append(f"{prog} {node.name} -- {header_text}")
+    parts.append(f"{t.prog}{prog} {node.name}{t.reset} -- {header_text}")
     parts.append("")
 
     # Subcommands — never collapsed within subtree help
     if node.children:
-        parts.append("Subcommands:")
+        parts.append(f"{t.heading}Subcommands:{t.reset}")
         no_collapse: frozenset[str] = frozenset()
         max_left = min(
             _compute_max_left(node.children, 1, no_collapse), 50
         )
         lines = _render_lines(
-            node.children, 1, max_left, term_width, no_collapse,
+            node.children, 1, max_left, term_width, no_collapse, t,
         )
         parts.extend(lines)
 
@@ -325,24 +403,25 @@ def format_subtree_help(
     own_options = _extract_all_flags(node.parser)
     if own_options:
         parts.append("")
-        parts.append("Options:")
+        parts.append(f"{t.heading}Options:{t.reset}")
         opt_max = max(len(flag) for flag, _ in own_options)
         for flag, help_text in own_options:
             padding = opt_max - len(flag) + _GAP
-            parts.append(f"  {flag}{' ' * padding}{help_text}")
+            colored = _color_flag(flag, t)
+            parts.append(f"  {colored}{' ' * padding}{help_text}")
 
     # Auth footer — detect which auth parent was inherited
     has_as_user = _has_action_dest(node.parser, "as_user")
     has_token = _has_action_dest(node.parser, "token")
     if has_token and has_as_user:
         parts.append("")
-        parts.append("Auth: --token TOKEN | --password PW [--as-user USR-ID] [--json]")
+        parts.append(f"{t.heading}Auth:{t.reset} --token TOKEN | --password PW [--as-user USR-ID] [--json]")
     elif has_token:
         parts.append("")
-        parts.append("Auth: --password PW | --token TOKEN [--json]")
+        parts.append(f"{t.heading}Auth:{t.reset} --password PW | --token TOKEN [--json]")
 
     parts.append("")
-    parts.append(f"Run '{prog} {node.name} <subcommand> --help' for details.")
+    parts.append(f"Run '{t.prog}{prog} {node.name}{t.reset} <subcommand> --help' for details.")
 
     return "\n".join(parts)
 
