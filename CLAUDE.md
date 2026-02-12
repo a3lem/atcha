@@ -17,11 +17,13 @@ Each user gets a directory under `.atcha/users/` with their profile and messages
 ```
 .atcha/
 ├── admin.json              # {"password_hash": "...", "salt": "..."}
+├── space.json              # {"id": "spc-xxxxx", "name": "project-name", ...}
+├── federation.local.json   # {"spaces": [...]} (federated space registry)
 ├── tokens/
 │   ├── _admin              # hash of admin token
-│   └── <user-id>           # hash of user token (e.g., usr-a3k9m)
+│   └── <user-id>           # hash of user token (e.g., maya-backend-engineer)
 └── users/
-    └── <user-id>/          # directory named by user id (e.g., usr-a3k9m)
+    └── <user-id>/          # directory named by user id (e.g., maya-backend-engineer)
         ├── profile.json
         └── messages/
             ├── inbox.jsonl
@@ -33,7 +35,7 @@ Each user gets a directory under `.atcha/users/` with their profile and messages
 
 ```json
 {
-  "id": "usr-a3k9m",
+  "id": "maya-backend-engineer",
   "name": "maya",
   "role": "Backend Engineer",
   "status": "Refactoring auth module",
@@ -49,8 +51,10 @@ The filesystem is the registry — a user exists if their directory exists.
 ### User identifiers and addresses
 
 Each user has two identifiers:
-- **name**: The user's unique name (e.g., `maya`), always unique within a space
-- **id**: Random alphanumeric identifier (e.g., `usr-a3k9m`), auto-generated and immutable
+- **name**: The user's display name (e.g., `maya`), always unique within a space, immutable
+- **id**: Deterministic identifier derived from `{name}-{slugify(role)}` (e.g., `maya-backend-engineer`), immutable. The user's directory name = user ID.
+
+Name and role are **immutable** — baked into the user ID. To change identity, create a new user.
 
 The **address** is the canonical way to reference users in CLI commands: `name@space` for cross-space, `name` for local. Behind the scenes, addresses resolve to user IDs.
 
@@ -68,9 +72,9 @@ atcha send --to maya@engineering "Hello from here"
 ```
 
 Examples:
-- `maya` (name) → `usr-a3k9m` (id), role: Backend Engineer
-- `alex` (name) → `usr-7x2pq` (id), role: Frontend Specialist
-- `kai` (name) → `usr-3n8qr` (id), role: Auth Expert
+- `maya` (name) → `maya-backend-engineer` (id), role: Backend Engineer
+- `alex` (name) → `alex-frontend-specialist` (id), role: Frontend Specialist
+- `kai` (name) → `kai-auth-expert` (id), role: Auth Expert
 
 ### Authentication model
 
@@ -110,18 +114,19 @@ atcha
 │   Auth flags (on user commands):
 │     --token <token>       user auth (or $ATCHA_TOKEN)
 │     --password <pw>       admin auth (or $ATCHA_ADMIN_PASS)
-│     --as-user <user-id>   act as USER (admin only, user commands only). USER is a user ID (e.g. usr-a3k9m)
+│     --as-user <user-id>   act as USER (admin only, user commands only). USER is a user ID (e.g. maya-backend-engineer)
 │     --json                machine-readable output
 │
 ├── contacts [--include-self] [--tags=x] [--full]
 │   └── show <id-or-address> [--full]
 │
-├── messages [--from=address] [--since=date] [--limit=N] [--include-read] [--no-preview]
+├── messages [--from=address] [--since=date] [--limit=N] [--include-read] [--no-preview] [--id=msg-id]
 │   ├── check
-│   └── read <msg-id> [msg-id...] [--no-mark]
+│   └── read <msg-id> [msg-id...] [--no-mark] [-q/--quiet]
 │
 ├── send --to <address> "content"
 ├── send --broadcast "content"
+├── send --reply-to <msg-id> "content"   # exclusive with --to
 │
 ├── profile
 │   └── update [--status <text>] [--about <text>] [--tags <csv>]
@@ -131,12 +136,12 @@ atcha
 ├── admin
 │   ├── status [-q/--quiet]
 │   ├── init [--password <pw>]
-│   ├── create-token --user <address>
+│   ├── create-token <user>
 │   ├── password --new <pw>
 │   ├── envs
 │   ├── users
 │   │   ├── create --name <n> --role <r> [--status] [--about] [--tags]
-│   │   ├── update <address> [--name] [--role] [--status] [--about] [--tags]
+│   │   ├── update <address> [--status] [--about] [--tags]
 │   │   └── delete <address>
 │   └── spaces
 │       ├── update [--name] [--description]
@@ -148,7 +153,7 @@ Design rules:
 - Bare plural = list (e.g. `contacts`, `messages`, `admin users`, `admin spaces`)
 - Subcommands = other verbs on that collection (e.g. `contacts show`, `messages read`)
 - Bare `profile` = show self
-- `whoami` defaults to address; `--id` returns `usr-xxx`; `--name` returns bare name
+- `whoami` defaults to address; `--id` returns user ID; `--name` returns bare name
 - `admin status` prints initialization state; `-q`/`--quiet` suppresses output (exit code only)
 
 ### Authentication
@@ -161,24 +166,25 @@ Design rules:
 
 Priority: password/ATCHA_ADMIN_PASS > token/ATCHA_TOKEN
 
-**Acting as a user**: `--as-user <user-id>` with admin auth on user commands. Takes a user ID (e.g. `usr-a3k9m`), not an address.
+**Acting as a user**: `--as-user <user-id>` with admin auth on user commands. Takes a user ID (e.g. `alice-backend-engineer`).
 
 ```bash
 # Check alice's inbox as admin
-atcha messages --password=secret --as-user=usr-a3k9m check
+atcha messages --password=secret --as-user=alice-backend-engineer check
 
 # Send from alice to bob as admin
-atcha send --password=secret --as-user=usr-a3k9m --to bob@ "Hello"
+atcha send --password=secret --as-user=alice-backend-engineer --to bob@ "Hello"
 
 # Update alice's profile as admin
-atcha profile update --password=secret --as-user=usr-a3k9m --status="On vacation"
+atcha profile update --password=secret --as-user=alice-backend-engineer --status="On vacation"
 ```
 
 ### Field permissions
 
 - **Self-service** (`profile update`): status, about, tags
-- **Admin-only** (`admin users create/update`): name, role
-- Admin commands can also set status, about, tags
+- **Admin-only** (`admin users create`): name, role (set at creation, immutable afterward)
+- **Admin-only** (`admin users update`): status, about, tags
+- Name and role are **immutable** — they're baked into the user ID
 
 ### Messages
 
@@ -247,13 +253,37 @@ The `check-inbox.sh` hook uses `messages check` to detect new messages, then `me
 
 ## Components
 
+### CLI modules (`src/atcha/cli/`)
+
+| Module | Purpose |
+|--------|---------|
+| `_types.py` | Constants, TypedDicts, AuthContext dataclass |
+| `errors.py` | Structured error formatting |
+| `utils.py` | Pure utilities (timestamps, message IDs) |
+| `validation.py` | Username validation, name slugification |
+| `store.py` | `.atcha/` data store (directories, profiles, user resolution) |
+| `auth.py` | Crypto, token management, authentication |
+| `federation.py` | Space identity, federation registry, cross-space resolution |
+| `parser.py` | argparse parser construction |
+| `main.py` | CLI entry point and dispatch |
+| `help.py` | Custom tree-formatted help |
+| `atcha.py` | Backward-compat shim (re-exports `main` and `_build_parser`) |
+| `commands/admin.py` | Admin commands (init, users, spaces, tokens) |
+| `commands/contacts.py` | Contact listing and viewing |
+| `commands/profile.py` | Profile and identity commands |
+| `commands/messages.py` | Message check, read, list |
+| `commands/send.py` | Send message command |
+| `commands/env.py` | Env discovery for hooks |
+
+### Other
+
 | Path | Purpose |
 |------|---------|
-| `src/atcha/cli/atcha.py` | Python CLI (stdlib-only) |
 | `extras/claude-plugin/skills/atcha/` | Claude Code skill |
 | `extras/claude-plugin/hooks/session-start.sh` | Auto-discover `.atcha/`, show identity |
 | `extras/claude-plugin/hooks/check-inbox.sh` | PostToolUse — surface new messages |
 | `tests/test_atcha.py` | pytest tests for CLI |
+| `tests/test_help.py` | pytest tests for custom help formatting |
 
 ## Requirements
 
@@ -280,7 +310,7 @@ export ATCHA_ADMIN_PASS=mypassword
 atcha admin users create --name maya --role "Backend Engineer"
 
 # Get user token and use it
-export ATCHA_TOKEN=$(atcha admin create-token --user maya@)
+export ATCHA_TOKEN=$(atcha admin create-token maya@)
 
 # Check your identity
 atcha whoami

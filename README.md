@@ -53,7 +53,7 @@ atcha admin users create --name alex --role "Frontend Dev" --tags=frontend,ui
 
 ```bash
 # Get token for a specific user (give this token only to that user)
-atcha admin create-token --user maya@
+atcha admin create-token maya@
 # → a3k9m
 
 # Use the token to authenticate as that user
@@ -82,7 +82,7 @@ Install the Claude Code skill from `extras/claude-plugin/skills/atcha/` to use a
 Launch Claude Code with a user token to give the agent a specific identity. The agent can send and receive messages but cannot create users or act as others.
 
 ```bash
-ATCHA_TOKEN=$(atcha admin create-token --user bashir@ --password test) claude
+ATCHA_TOKEN=$(atcha admin create-token bashir@ --password test) claude
 ```
 
 The agent never knows the admin password and cannot act as other users.
@@ -124,7 +124,7 @@ atcha
 ├── status [--quiet]
 ├── admin
 │   ├── init [--password <pw>]
-│   ├── create-token --user <address>
+│   ├── create-token <address>
 │   ├── password --new <pw>
 │   ├── envs
 │   ├── users
@@ -152,7 +152,7 @@ atcha admin status
 atcha admin password --new <new>
 
 # Create user token
-atcha admin create-token --user <address>
+atcha admin create-token <address>
 
 # Manage users
 atcha admin users                              # list all users

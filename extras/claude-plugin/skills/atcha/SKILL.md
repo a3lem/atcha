@@ -91,8 +91,8 @@ atcha admin users add --name maya --role "Backend Engineer"
 # Auto-generates id: usr-XXXXX (random)
 
 # Generate tokens for users
-atcha admin create-token --user anna
-atcha admin create-token --user maya
+atcha admin create-token anna
+atcha admin create-token maya
 ```
 
 ### Admin commands reference
@@ -105,7 +105,7 @@ atcha contacts --include-self  # Uses admin auth (--password or $ATCHA_ADMIN_PAS
 atcha admin users add --name <short-name> --role "<Role>" [--tags=tag1,tag2] [--about="..."]
 
 # Create user token
-atcha admin create-token --user <name-or-id>
+atcha admin create-token <name-or-id>
 
 # Change admin password
 atcha admin password --password <old> --new <new>
@@ -139,7 +139,7 @@ atcha contacts --names-only  # See available users
 ```
 
 **"Invalid token"**
-Ask admin to regenerate: `atcha admin create-token --user <name>`
+Ask admin to regenerate: `atcha admin create-token <name>`
 
 ---
 

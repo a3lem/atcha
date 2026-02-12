@@ -78,7 +78,7 @@ Tokens are deterministically derived from admin password + user id + salt. Same 
 
 ```bash
 # Create/regenerate user token
-atcha admin create-token --user anna
+atcha admin create-token anna
 
 # Output: a3k9m (5-character alphanumeric)
 ```
@@ -93,11 +93,11 @@ atcha admin create-token --user anna
 
 ```bash
 # Save to variable for distribution
-TOKEN=$(atcha admin create-token --user anna)
+TOKEN=$(atcha admin create-token anna)
 echo "Your atcha token: $TOKEN"
 
 # Or create and immediately set for testing
-export ATCHA_TOKEN=$(atcha admin create-token --user anna)
+export ATCHA_TOKEN=$(atcha admin create-token anna)
 atcha whoami  # Should print "anna"
 ```
 
@@ -111,7 +111,7 @@ atcha admin password --password <current> --new <new-password>
 
 **After password change:**
 - All existing user tokens become invalid
-- Regenerate all user tokens with `atcha admin create-token --user <name>`
+- Regenerate all user tokens with `atcha admin create-token <name>`
 - This is because tokens are derived from the admin password
 
 ### Token Security
@@ -140,8 +140,8 @@ atcha admin users add --name anna --role "CLI Specialist"
 atcha admin users add --name maya --role "Backend Engineer"
 
 # Generate tokens
-TOKEN_ANNA=$(atcha admin create-token --user anna)
-TOKEN_MAYA=$(atcha admin create-token --user maya)
+TOKEN_ANNA=$(atcha admin create-token anna)
+TOKEN_MAYA=$(atcha admin create-token maya)
 ```
 
 ### Per-Worktree Configuration
@@ -202,7 +202,7 @@ atcha contacts --include-self --names-only  # See all names
 **User can't authenticate**
 ```bash
 # Regenerate token
-atcha admin create-token --user <name>
+atcha admin create-token <name>
 # Provide new token to user
 ```
 
@@ -253,7 +253,7 @@ export ATCHA_ADMIN_PASS=<pw>
 # Users
 atcha contacts --include-self
 atcha admin users add --name <name> --role "<Role>"
-atcha admin create-token --user <name>
+atcha admin create-token <name>
 
 # Security
 atcha admin password --password <old> --new <new>
