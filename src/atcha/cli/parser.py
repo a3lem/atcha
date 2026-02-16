@@ -86,10 +86,15 @@ def _build_parser() -> Parsers:
     messages_sub = messages_parser.add_subparsers(dest="messages_command", metavar="<subcommand>")
 
     # messages check
-    _ = messages_sub.add_parser(
+    messages_check = messages_sub.add_parser(
         "check",
         help="Quick inbox summary (count + senders)",
         description="Show summary of unread messages without marking as read.",
+    )
+    _ = messages_check.add_argument(
+        "--hook",
+        action="store_true",
+        help="Hook mode: suppress output when no unread messages (saves context tokens)",
     )
 
     # messages read <msg-id> [msg-id...]
@@ -204,7 +209,7 @@ def _build_parser() -> Parsers:
         description="Generate authentication token for a user.",
         parents=[base_auth],
     )
-    _ = admin_create_token.add_argument("user", help="User address (e.g. maya@) or name")
+    _ = admin_create_token.add_argument("--user", required=True, help="User address (e.g. maya@) or name")
 
     # admin users (bare = list)
     admin_users = admin_sub.add_parser(
@@ -255,6 +260,32 @@ def _build_parser() -> Parsers:
         help="Show helpful admin hints and reminders",
         parents=[base_auth],
     )
+
+    # admin prime
+    _ = admin_sub.add_parser(
+        "prime",
+        help="Print session-start primer (identity + essential commands)",
+        description="Print a concise primer for AI agent sessions: identity and essential commands. Exits silently if no auth is available.",
+        parents=[base_auth],
+    )
+
+    # admin onboard
+    _ = admin_sub.add_parser(
+        "onboard",
+        help="Print CLAUDE.md snippet for this project",
+        description="Print markdown snippet to add to AGENTS.md/CLAUDE.md, telling agents this project uses atcha.",
+        parents=[base_auth],
+    )
+
+    # admin install
+    admin_install = admin_sub.add_parser(
+        "install",
+        help="Install atcha for a coding agent (hooks + CLAUDE.md)",
+        description="Install atcha for the specified coding agent: session hooks and CLAUDE.md snippet.\n\nSupported targets:\n  claude    Claude Code (.claude/settings.json hooks + CLAUDE.md)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        parents=[base_auth],
+    )
+    _ = admin_install.add_argument("target", choices=["claude"], help="Target agent")
 
     # admin spaces (bare = list)
     admin_spaces = admin_sub.add_parser(

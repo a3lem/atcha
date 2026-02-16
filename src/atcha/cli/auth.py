@@ -22,7 +22,7 @@ from atcha.cli._types import (
     AuthContext,
 )
 from atcha.cli.validation import _slugify_name
-
+from atcha.cli.utils import TOKEN_ALPHABET
 
 # ---------------------------------------------------------------------------
 # Password hashing
@@ -49,7 +49,6 @@ def _verify_password(password: str, stored_hash: str, salt: str) -> bool:
 # Token management
 # ---------------------------------------------------------------------------
 
-from atcha.cli.utils import TOKEN_ALPHABET
 
 
 def _generate_user_id(name: str, role: str) -> str:
@@ -191,7 +190,9 @@ def _require_admin(atcha_dir: Path, password: str) -> None:
         )
 
     admin_config = T.cast(AdminConfig, json.loads(admin_file.read_text()))
-    if not _verify_password(password, admin_config["password_hash"], admin_config["salt"]):
+    if not _verify_password(
+        password, admin_config["password_hash"], admin_config["salt"]
+    ):
         _error("Invalid password")
 
 

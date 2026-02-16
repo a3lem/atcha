@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import typing as T
 
@@ -9,7 +10,10 @@ from atcha.cli.commands.admin import (
     cmd_admin_federated_add,
     cmd_admin_federated_remove,
     cmd_admin_hints,
+    cmd_admin_install,
+    cmd_admin_onboard,
     cmd_admin_password,
+    cmd_admin_prime,
     cmd_admin_spaces_list,
     cmd_admin_spaces_update,
     cmd_admin_users_delete,
@@ -35,6 +39,11 @@ from atcha.cli._types import AuthContext
 
 
 def main() -> None:
+    # Allow users to silence atcha entirely (e.g. when hooks are installed
+    # globally but the current session shouldn't use atcha).
+    if os.environ.get("ATCHA_DISABLED") == "1":
+        sys.exit(0)
+
     parsers = _build_parser()
 
     # ---------- Parse and dispatch ----------
@@ -67,7 +76,7 @@ def main() -> None:
     elif command == "messages":
         msg_sub = T.cast(str | None, getattr(args, "messages_command", None))
         if msg_sub == "check":
-            cmd_messages_check(auth)
+            cmd_messages_check(auth, args)
         elif msg_sub == "read":
             cmd_messages_read(auth, args)
         else:
@@ -114,6 +123,12 @@ def main() -> None:
             cmd_create_token(auth, args)
         elif admin_command == "hints":
             cmd_admin_hints(auth)
+        elif admin_command == "prime":
+            cmd_admin_prime(auth)
+        elif admin_command == "onboard":
+            cmd_admin_onboard(auth)
+        elif admin_command == "install":
+            cmd_admin_install(auth, args)
 
         elif admin_command == "users":
             users_sub = T.cast(str | None, getattr(args, "users_command", None))

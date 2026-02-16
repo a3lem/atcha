@@ -96,7 +96,7 @@ def _create_user_full(
     user_id: str = profile["id"]
 
     # Get user token using the name
-    result = run_cli("admin", "create-token", user_name, env=env, cwd=str(cwd))
+    result = run_cli("admin", "create-token", "--user", user_name, env=env, cwd=str(cwd))
     assert result.returncode == 0, result.stderr
     return result.stdout.strip(), user_id
 
@@ -225,7 +225,7 @@ class TestCreateToken:
         assert result.returncode == 0
 
         # Create token using --password
-        result = run_cli("admin", "create-token", "test-user", f"--password={PASSWORD}", cwd=str(cwd))
+        result = run_cli("admin", "create-token", "--user", "test-user", f"--password={PASSWORD}", cwd=str(cwd))
         assert result.returncode == 0
         token = result.stdout.strip()
         assert len(token) == 5  # 5-char token (not user ID)
@@ -240,14 +240,14 @@ class TestCreateToken:
         assert result.returncode == 0
 
         # Create token using env var (no --password)
-        result = run_cli("admin", "create-token", "test-user", env=env, cwd=str(cwd))
+        result = run_cli("admin", "create-token", "--user", "test-user", env=env, cwd=str(cwd))
         assert result.returncode == 0
         token = result.stdout.strip()
         assert len(token) == 5  # 5-char token (not user ID)
 
     def test_rejects_nonexistent_user(self, atcha_dir: Path) -> None:
         cwd = atcha_dir.parent
-        result = run_cli("admin", "create-token", "nobody", f"--password={PASSWORD}", cwd=str(cwd))
+        result = run_cli("admin", "create-token", "--user", "nobody", f"--password={PASSWORD}", cwd=str(cwd))
         assert result.returncode != 0
         assert "not found" in result.stderr
 
@@ -261,11 +261,11 @@ class TestCreateToken:
         assert result.returncode == 0
 
         # Create token twice - should get same result
-        result1 = run_cli("admin", "create-token", "test-user", f"--password={PASSWORD}", cwd=str(cwd))
+        result1 = run_cli("admin", "create-token", "--user", "test-user", f"--password={PASSWORD}", cwd=str(cwd))
         assert result1.returncode == 0
         token1 = result1.stdout.strip()
 
-        result2 = run_cli("admin", "create-token", "test-user", f"--password={PASSWORD}", cwd=str(cwd))
+        result2 = run_cli("admin", "create-token", "--user", "test-user", f"--password={PASSWORD}", cwd=str(cwd))
         assert result2.returncode == 0
         token2 = result2.stdout.strip()
 
@@ -280,7 +280,7 @@ class TestCreateToken:
         result = run_cli("admin", "users", "create", "--name=test-user", "--role=Test", env=env, cwd=str(cwd))
         assert result.returncode == 0
 
-        result = run_cli("admin", "create-token", "test-user", f"--password={PASSWORD}", cwd=str(cwd))
+        result = run_cli("admin", "create-token", "--user", "test-user", f"--password={PASSWORD}", cwd=str(cwd))
         assert result.returncode == 0
         token = result.stdout.strip()
 
@@ -336,7 +336,7 @@ class TestAgentsAdd:
 
         # Create user and get their token
         _ = run_cli("admin", "users", "create", "--name=testuser", "--role=Test", env=admin_env, cwd=str(cwd))
-        result = run_cli("admin", "create-token", "testuser", env=admin_env, cwd=str(cwd))
+        result = run_cli("admin", "create-token", "--user", "testuser", env=admin_env, cwd=str(cwd))
         user_token = result.stdout.strip()
 
         # Try to create with user token (no admin password in env)
@@ -515,7 +515,7 @@ class TestAgents:
         _ = run_cli("admin", "users", "create", "--name=backend-dev", "--role=Backend", "--tags=backend,api", env=admin_env, cwd=str(cwd))
         _ = run_cli("admin", "users", "create", "--name=frontend-dev", "--role=Frontend", "--tags=frontend,ui", env=admin_env, cwd=str(cwd))
         # Get a user token to authenticate with contacts
-        backend_token = run_cli("admin", "create-token", "backend-dev", env=admin_env, cwd=str(cwd)).stdout.strip()
+        backend_token = run_cli("admin", "create-token", "--user", "backend-dev", env=admin_env, cwd=str(cwd)).stdout.strip()
 
         user_env = {"ATCHA_TOKEN": backend_token, "ATCHA_DIR": str(atcha_dir)}
         result = run_cli("contacts", "--include-self", "--tags=backend", env=user_env, cwd=str(cwd))
@@ -1034,26 +1034,6 @@ class TestMessagesList:
         assert len(messages) == 1
         assert messages[0]["from"] == "alice"
 
-    def test_backward_compat_body(self, atcha_dir: Path) -> None:
-        """Can read old messages with 'body' field."""
-        cwd = atcha_dir.parent
-        _ = _create_user(atcha_dir, "sender")
-        recipient_token = _create_user(atcha_dir, "recipient")
-
-        # Manually write old-format message with 'body' field
-        inbox = _user_dir(atcha_dir, "recipient", "Test Agent") / "messages" / "inbox.jsonl"
-        old_msg = {"id": "msg-old123", "thread_id": "msg-old123", "from": "sender", "to": ["recipient"], "ts": "2026-01-01T00:00:00Z", "type": "message", "body": "Old format message"}
-        inbox.write_text(json.dumps(old_msg) + "\n")
-
-        # List should work and show preview from 'body' field
-        recipient_env = {"ATCHA_TOKEN": recipient_token, "ATCHA_DIR": str(atcha_dir)}
-        result = run_cli("messages", env=recipient_env, cwd=str(cwd))
-        assert result.returncode == 0
-
-        messages: list[dict[str, T.Any]] = json.loads(result.stdout)
-        assert len(messages) == 1
-        assert messages[0]["preview"] == "Old format message"
-
 
 # ---------- send ----------
 
@@ -1407,10 +1387,10 @@ class TestIntegration:
         assert result.returncode == 0
 
         # 4. Get user tokens
-        result = run_cli("admin", "create-token", "maya-backend", f"--password={PASSWORD}", cwd=str(tmp_path))
+        result = run_cli("admin", "create-token", "--user", "maya-backend", f"--password={PASSWORD}", cwd=str(tmp_path))
         maya_token = result.stdout.strip()
 
-        result = run_cli("admin", "create-token", "alex-frontend", f"--password={PASSWORD}", cwd=str(tmp_path))
+        result = run_cli("admin", "create-token", "--user", "alex-frontend", f"--password={PASSWORD}", cwd=str(tmp_path))
         alex_token = result.stdout.strip()
 
         # 5. Maya sends message to Alex
@@ -1722,7 +1702,7 @@ class TestFederationMessaging:
         assert result.returncode == 0
 
         # Get remote user token
-        result = run_cli("admin", "create-token", "remote-user", env=remote_env, cwd=str(federation_base / "remote-project"))
+        result = run_cli("admin", "create-token", "--user", "remote-user", env=remote_env, cwd=str(federation_base / "remote-project"))
         remote_token = result.stdout.strip()
 
         # Get remote space handle
@@ -1787,7 +1767,7 @@ class TestFederationMessaging:
         _ = run_cli("admin", "users", "create", "--name=remote-user", "--role=Remote Dev", env=remote_env, cwd=str(federation_base / "remote-project"))
 
         # Get remote user token
-        result = run_cli("admin", "create-token", "remote-user", env=remote_env, cwd=str(federation_base / "remote-project"))
+        result = run_cli("admin", "create-token", "--user", "remote-user", env=remote_env, cwd=str(federation_base / "remote-project"))
         remote_token = result.stdout.strip()
 
         # Get space handles
@@ -1829,7 +1809,7 @@ class TestFederationMessaging:
         assert result.returncode == 0
 
         # Get remote user token
-        result = run_cli("admin", "create-token", "remote-user", env=remote_env, cwd=str(federation_base / "remote-proj"))
+        result = run_cli("admin", "create-token", "--user", "remote-user", env=remote_env, cwd=str(federation_base / "remote-proj"))
         remote_token = result.stdout.strip()
 
         # Get space handles
@@ -1895,7 +1875,7 @@ class TestFederationBackwardCompat:
         _ = run_cli("admin", "users", "create", "--name=recipient", "--role=Test", env=env, cwd=str(tmp_path))
 
         # Get sender token
-        result = run_cli("admin", "create-token", "sender", env=env, cwd=str(tmp_path))
+        result = run_cli("admin", "create-token", "--user", "sender", env=env, cwd=str(tmp_path))
         sender_token = result.stdout.strip()
 
         # Send a message - this triggers auto-upgrade because cmd_send uses _ensure_space_config

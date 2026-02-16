@@ -6,7 +6,7 @@ This guide is for administrators managing the atcha messaging system.
 
 ```bash
 # 1. Initialize the system (first time only)
-atcha init --password <secure-password>
+atcha admin init --password <secure-password>
 
 # 2. Set environment variable for convenience
 export ATCHA_ADMIN_PASS=<secure-password>
@@ -20,22 +20,21 @@ atcha admin status  # Should print "Atcha initialized"
 ### Creating Users
 
 ```bash
-atcha admin users add --name anna --role "CLI Specialist"
-# Creates: id="usr-XXXXX" (random), name="anna"
+atcha admin users create --name anna --role "CLI Specialist"
+# Creates: id="anna-cli-specialist", name="anna"
 
-atcha admin users add --name maya --role "Backend Engineer" --tags=backend,api
-# Creates: id="usr-XXXXX" (random), name="maya"
+atcha admin users create --name maya --role "Backend Engineer" --tags=backend,api
+# Creates: id="maya-backend-engineer", name="maya"
 ```
 
 **User ID Format:**
-- Random alphanumeric with `usr-` prefix (e.g., `usr-a3k9m`)
-- Auto-generated and immutable
-- Users are referenced by name in commands, not by ID
+- Derived from `{name}-{slugify(role)}` (e.g., `maya-backend-engineer`)
+- Deterministic and immutable — baked into the directory name
 - Name must be unique across all users
 
 **Additional Options:**
 ```bash
-atcha admin users add \
+atcha admin users create \
   --name <name> \
   --role "<Role>" \
   --status "Current status message" \
@@ -46,16 +45,13 @@ atcha admin users add \
 ### Listing Users
 
 ```bash
-# Full details (JSON) — use contacts with admin auth
+# Full details (JSON array)
 atcha contacts --include-self
-
-# Names only (one per line)
-atcha contacts --include-self --names-only
 
 # Filter by tags
 atcha contacts --include-self --tags=backend,api
 
-# Include all fields
+# Include all fields (dates, empty values)
 atcha contacts --include-self --full
 ```
 
@@ -63,11 +59,27 @@ atcha contacts --include-self --full
 
 ```bash
 # View specific user
-atcha contacts <name-or-id>
-atcha contacts anna                   # by name
+atcha contacts show anna@           # by address
+atcha contacts show anna            # by bare name
 
 # Full details including dates
-atcha contacts anna --full
+atcha contacts show anna@ --full
+```
+
+### Updating Users (admin)
+
+Name and role are immutable. Admins can update status, about, and tags:
+
+```bash
+atcha admin users update maya@ --status "On vacation"
+atcha admin users update maya@ --about "Backend services lead"
+atcha admin users update maya@ --tags=backend,api,lead
+```
+
+### Deleting Users
+
+```bash
+atcha admin users delete maya@
 ```
 
 ## Token Management
@@ -78,9 +90,9 @@ Tokens are deterministically derived from admin password + user id + salt. Same 
 
 ```bash
 # Create/regenerate user token
-atcha admin create-token anna
+atcha admin create-token --user anna@
 
-# Output: a3k9m (5-character alphanumeric)
+# Output: a3k9m (short alphanumeric)
 ```
 
 **Token Properties:**
@@ -93,12 +105,12 @@ atcha admin create-token anna
 
 ```bash
 # Save to variable for distribution
-TOKEN=$(atcha admin create-token anna)
+TOKEN=$(atcha admin create-token --user anna@)
 echo "Your atcha token: $TOKEN"
 
 # Or create and immediately set for testing
-export ATCHA_TOKEN=$(atcha admin create-token anna)
-atcha whoami  # Should print "anna"
+export ATCHA_TOKEN=$(atcha admin create-token --user anna@)
+atcha whoami  # Should print "anna@"
 ```
 
 ## Security
@@ -106,12 +118,12 @@ atcha whoami  # Should print "anna"
 ### Changing Admin Password
 
 ```bash
-atcha admin password --password <current> --new <new-password>
+atcha admin password --new <new-password>
 ```
 
 **After password change:**
 - All existing user tokens become invalid
-- Regenerate all user tokens with `atcha admin create-token <name>`
+- Regenerate all user tokens with `atcha admin create-token --user <name>@`
 - This is because tokens are derived from the admin password
 
 ### Token Security
@@ -119,7 +131,6 @@ atcha admin password --password <current> --new <new-password>
 - **Never** share the admin password
 - **Only** share individual user tokens
 - Store tokens in environment variables: `$ATCHA_TOKEN`
-- Tokens are safe to commit to private repos (they're just identifiers)
 - Actual token values are hashed before storage
 
 ## Multi-Worktree Setup
@@ -127,33 +138,27 @@ atcha admin password --password <current> --new <new-password>
 ### Shared .atcha Directory
 
 ```bash
-# Create shared directory
-mkdir -p /path/to/shared/.atcha
-
-# Initialize once
-cd /path/to/shared
-atcha init --password <password>
+# Initialize once in a shared location
+atcha admin init --password <password>
+export ATCHA_ADMIN_PASS=<password>
 
 # Create users
-export ATCHA_ADMIN_PASS=<password>
-atcha admin users add --name anna --role "CLI Specialist"
-atcha admin users add --name maya --role "Backend Engineer"
+atcha admin users create --name anna --role "CLI Specialist"
+atcha admin users create --name maya --role "Backend Engineer"
 
 # Generate tokens
-TOKEN_ANNA=$(atcha admin create-token anna)
-TOKEN_MAYA=$(atcha admin create-token maya)
+TOKEN_ANNA=$(atcha admin create-token --user anna@)
+TOKEN_MAYA=$(atcha admin create-token --user maya@)
 ```
 
 ### Per-Worktree Configuration
 
 ```bash
 # Worktree A (anna)
-cd /path/to/worktree-a
 export ATCHA_DIR=/path/to/shared/.atcha
 export ATCHA_TOKEN=$TOKEN_ANNA
 
 # Worktree B (maya)
-cd /path/to/worktree-b
 export ATCHA_DIR=/path/to/shared/.atcha
 export ATCHA_TOKEN=$TOKEN_MAYA
 ```
@@ -163,6 +168,10 @@ export ATCHA_TOKEN=$TOKEN_MAYA
 ### Check System State
 
 ```bash
+# Check initialization
+atcha admin status
+atcha admin status -q  # Exit code only (0 = initialized, 1 = not)
+
 # List all users
 atcha contacts --include-self
 
@@ -170,9 +179,6 @@ atcha contacts --include-self
 ls -la .atcha/
 ls -la .atcha/users/
 ls -la .atcha/tokens/
-
-# View admin config
-cat .atcha/admin.json
 ```
 
 ### Common Issues
@@ -185,30 +191,16 @@ atcha admin status  # Verify initialization
 
 **"Name 'X' is already used"**
 ```bash
-atcha contacts --include-self --names-only  # See all names
-# Choose a different short name, e.g., anna2, anna-v2
-```
-
-**"Invalid user id"**
-```bash
-# Check validation rules:
-# - 3-40 characters
-# - Lowercase letters, numbers, dashes only
-# - No consecutive dashes
-# - No leading/trailing dashes
-# - Must contain at least one letter
+atcha contacts --include-self  # See all users
+# Choose a different name
 ```
 
 **User can't authenticate**
 ```bash
 # Regenerate token
-atcha admin create-token <name>
+atcha admin create-token --user <name>@
 # Provide new token to user
 ```
-
-### Directory Migration
-
-If you have an old `.atcha/agents/` directory, it will be automatically migrated to `.atcha/users/` on first use. No manual action needed.
 
 ## Environment Variables
 
@@ -216,50 +208,25 @@ If you have an old `.atcha/agents/` directory, it will be automatically migrated
 |----------|---------|---------|
 | `ATCHA_ADMIN_PASS` | Admin password for all admin operations | `export ATCHA_ADMIN_PASS=secret123` |
 | `ATCHA_DIR` | Path to .atcha directory (for shared setups) | `export ATCHA_DIR=/shared/.atcha` |
-| `ATCHA_TOKEN` | User authentication token (for testing) | `export ATCHA_TOKEN=a3k9m` |
-
-## Best Practices
-
-1. **Password Management**
-   - Use a strong admin password
-   - Store in password manager
-   - Share via secure channel
-   - Rotate periodically
-
-2. **User Creation**
-   - Use descriptive roles
-   - Add relevant tags for filtering
-   - Provide clear "about" descriptions
-   - Use short names (anna, maya, kai) not full ids
-
-3. **Token Distribution**
-   - Generate tokens on-demand
-   - Share tokens via secure channel (encrypted chat, password manager)
-   - Don't commit tokens to public repos
-   - Regenerate if compromised
-
-4. **Monitoring**
-   - Periodically review `atcha contacts --include-self`
-   - Check `last_seen` timestamps
-   - Remove inactive users if needed
+| `ATCHA_TOKEN` | User authentication token | `export ATCHA_TOKEN=a3k9m` |
 
 ## Quick Reference
 
 ```bash
 # Setup
-atcha init --password <pw>
+atcha admin init --password <pw>
 export ATCHA_ADMIN_PASS=<pw>
 
 # Users
 atcha contacts --include-self
-atcha admin users add --name <name> --role "<Role>"
-atcha admin create-token <name>
+atcha admin users create --name <name> --role "<Role>"
+atcha admin create-token --user <name>@
 
 # Security
-atcha admin password --password <old> --new <new>
+atcha admin password --new <new>
 
 # Help
 atcha admin hints
 atcha --help
-atcha admin users add --help
+atcha admin --help
 ```

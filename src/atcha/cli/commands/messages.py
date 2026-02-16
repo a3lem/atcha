@@ -7,7 +7,7 @@ import json
 import sys
 import typing as T
 
-from atcha.cli.auth import _require_user
+from atcha.cli.auth import _get_password, _get_token, _require_user
 from atcha.cli.errors import _error
 from atcha.cli.federation import (
     _ensure_space_config,
@@ -16,44 +16,46 @@ from atcha.cli.federation import (
     _match_sender_address,
 )
 from atcha.cli.store import (
+    _get_atcha_dir,
     _get_user_dir,
     _update_last_seen,
 )
-from atcha.cli._types import AuthContext, Message, MessagesState
+from atcha.cli._types import AuthContext, Message
 
 
-def _get_message_content(msg: Message) -> str:
-    """Get message content, with fallback for old 'body' field."""
-    return T.cast(str, msg.get("content") or msg.get("body", ""))
 
-
-def cmd_messages_check(auth: AuthContext) -> None:
+def cmd_messages_check(auth: AuthContext, args: argparse.Namespace) -> None:
     """Check inbox summary."""
+    hook_mode = T.cast(bool, getattr(args, "hook", False))
+
+    # In hook mode, exit silently if atcha is not initialized or no
+    # credentials are available — avoids noisy errors on every tool call.
+    if hook_mode:
+        if _get_atcha_dir() is None:
+            return
+        if not _get_password(auth) and not _get_token(auth):
+            return
+
     atcha_dir, user_name = _require_user(auth)
 
     user_dir = _get_user_dir(atcha_dir, user_name)
     inbox = user_dir / "messages" / "inbox.jsonl"
 
     if not inbox.exists() or inbox.stat().st_size == 0:
+        if hook_mode:
+            return  # Silent — no output saves context tokens
         if auth.json_output:
             print(json.dumps({"count": 0, "senders": {}}))
         else:
             print("No messages")
         return
 
-    # Get last_read for unread filtering
-    state_file = user_dir / "messages" / "state.json"
-    last_read: str | None = None
-    if state_file.exists():
-        state = T.cast(MessagesState, json.loads(state_file.read_text()))
-        last_read = state.get("last_read")
-
     # Load space info for cross-space sender formatting
     local_space = _ensure_space_config(atcha_dir)
     federation = _load_federation(atcha_dir)
     warnings: set[str] = set()
 
-    # Collect and count messages
+    # Collect and count unread messages
     messages: list[Message] = []
     sender_counts: dict[str, int] = {}
 
@@ -65,8 +67,7 @@ def cmd_messages_check(auth: AuthContext) -> None:
         except json.JSONDecodeError:
             continue
 
-        # Filter by last_read (show only unread)
-        if last_read and msg["ts"] <= last_read:
+        if msg["read"]:
             continue
 
         messages.append(msg)
@@ -77,6 +78,8 @@ def cmd_messages_check(auth: AuthContext) -> None:
         sender_counts[formatted_sender] = sender_counts.get(formatted_sender, 0) + 1
 
     if not messages:
+        if hook_mode:
+            return  # Silent — no output saves context tokens
         if auth.json_output:
             print(json.dumps({"count": 0, "senders": {}}))
         else:
@@ -136,12 +139,12 @@ def cmd_messages_read(auth: AuthContext, args: argparse.Namespace) -> None:
         _error("at least one message ID required")
     target_ids_set = set(target_ids)
 
-    state_file = user_dir / "messages" / "state.json"
-
-    latest_ts: str | None = None
+    # Read all lines from inbox — we may need to rewrite with updated read flags
+    all_lines = inbox.read_text().splitlines()
+    matched_any = False
     json_array_msgs: list[dict[str, T.Any]] = []
 
-    for line in inbox.read_text().splitlines():
+    for i, line in enumerate(all_lines):
         if not line.strip():
             continue
         try:
@@ -153,11 +156,14 @@ def cmd_messages_read(auth: AuthContext, args: argparse.Namespace) -> None:
         if msg.get("id") not in target_ids_set:
             continue
 
-        # Track latest timestamp
-        if latest_ts is None or msg["ts"] > latest_ts:
-            latest_ts = msg["ts"]
+        matched_any = True
 
-        # In quiet mode, skip output but still track timestamps for mark-as-read
+        # Mark as read in-place for later rewrite (unless --no-mark)
+        if not no_mark:
+            msg["read"] = True
+            all_lines[i] = json.dumps(msg, separators=(",", ":"))
+
+        # In quiet mode, skip output but still mark as read
         if quiet:
             continue
 
@@ -181,15 +187,9 @@ def cmd_messages_read(auth: AuthContext, args: argparse.Namespace) -> None:
     if not quiet and auth.json_output:
         print(json.dumps(json_array_msgs, indent=2))
 
-    # Mark as read (unless --no-mark)
-    if latest_ts is not None and not no_mark:
-        state_data: MessagesState = {}
-        if state_file.exists():
-            state_data = T.cast(MessagesState, json.loads(state_file.read_text()))
-        state_data["last_read"] = latest_ts
-        _ = state_file.write_text(json.dumps(state_data) + "\n")
-
-        # Update user's last_seen timestamp
+    # Rewrite inbox with updated read flags
+    if matched_any and not no_mark:
+        _ = inbox.write_text("\n".join(all_lines) + "\n")
         _update_last_seen(user_dir)
 
     # Print warnings for unknown spaces
@@ -226,13 +226,6 @@ def cmd_messages_list(auth: AuthContext, args: argparse.Namespace) -> None:
     ids_filter_raw = T.cast(list[str] | None, getattr(args, "ids", None))
     ids_filter = set(ids_filter_raw) if ids_filter_raw else None
 
-    # Get last_read for unread filtering
-    state_file = user_dir / "messages" / "state.json"
-    last_read: str | None = None
-    if not include_read and state_file.exists():
-        state = T.cast(MessagesState, json.loads(state_file.read_text()))
-        last_read = state.get("last_read")
-
     messages: list[dict[str, T.Any]] = []
 
     for line in inbox.read_text().splitlines():
@@ -243,8 +236,7 @@ def cmd_messages_list(auth: AuthContext, args: argparse.Namespace) -> None:
         except json.JSONDecodeError:
             continue
 
-        # Filter by last_read (show only unread, unless --include-read)
-        if last_read and msg["ts"] <= last_read:
+        if not include_read and msg["read"]:
             continue
 
         # Filter by --id (explicit message IDs)
@@ -275,8 +267,7 @@ def cmd_messages_list(auth: AuthContext, args: argparse.Namespace) -> None:
             warnings.add(warning)
         output["from"] = formatted_sender
 
-        # Handle content/body field
-        content = _get_message_content(msg)
+        content = T.cast(str, msg["content"])
 
         # Add preview or full content
         if no_preview:
@@ -288,8 +279,6 @@ def cmd_messages_list(auth: AuthContext, args: argparse.Namespace) -> None:
             else:
                 output["preview"] = content
 
-        # Remove old body field from output, we've handled it
-        output.pop("body", None)
         if not no_preview:
             output.pop("content", None)
 

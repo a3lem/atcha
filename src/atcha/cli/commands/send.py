@@ -246,6 +246,7 @@ def cmd_send(auth: AuthContext, args: argparse.Namespace) -> None:
         "ts": ts,
         "type": "message",
         "content": content,
+        "read": False,
     }
 
     # Add reply_to field if replying

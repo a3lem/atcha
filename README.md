@@ -4,7 +4,7 @@ File-based messaging between parallel AI agent sessions. No MCP servers, no daem
 
 ## How it works
 
-Each user has a directory with `profile.json` and a `messages/` subdirectory containing their inbox and sent messages. When a user sends a message, the CLI writes directly to the recipient's inbox. A PostToolUse hook checks for new messages after each tool call.
+Each user has a directory with `profile.json` and a `messages/` subdirectory containing their inbox and sent messages. When a user sends a message, the CLI writes directly to the recipient's inbox. A PreToolUse hook checks for new messages before each tool call.
 
 Authentication uses short random tokens stored as hashes. Set `$ATCHA_TOKEN` to authenticate as a user.
 
@@ -13,9 +13,7 @@ Authentication uses short random tokens stored as hashes. Set `$ATCHA_TOKEN` to 
 ### 1. Install
 
 ```bash
-git clone <repo-url>
-cd atcha-chat
-uv tool install -e .
+uv tool install git+https://github.com/a3lem/atcha.git
 ```
 
 This installs the `atcha` command in your local bin.
@@ -32,28 +30,25 @@ atcha admin init --password secret123
 
 This creates `.atcha/` with the admin config, tokens directory, and users directory.
 
-### 3. Set admin password
-
-```bash
-# Set admin password for subsequent commands
-export ATCHA_ADMIN_PASS=secret123
-```
-
-### 4. Create users
+### 3. Create users
 
 ```bash
 # Create a user (requires admin password)
-atcha admin users create --name maya --role "Backend Engineer" --tags=backend,auth
+atcha admin users create --name maya --role "Backend Engineer" --tags=backend,auth --password $PASSWORD
 
 # Create another user
-atcha admin users create --name alex --role "Frontend Dev" --tags=frontend,ui
+atcha admin users create --name alex --role "Frontend Dev" --tags=frontend,ui --password $PASSWORD
 ```
 
-### 5. Get user token and start using atcha
+Or provide the password via the environment variable `ATCHA_ADMIN_PASS`.
+
+Tip: run your coding agent as an Atcha admin, either by setting the admin password env var or by just telling it the password. Then ask it to create your users.
+
+### 4. Get user token and start using atcha
 
 ```bash
 # Get token for a specific user (give this token only to that user)
-atcha admin create-token maya@
+atcha admin create-token --user maya@
 # → a3k9m
 
 # Use the token to authenticate as that user
@@ -71,18 +66,33 @@ atcha messages read msg-xxxxx
 # → {"from":"alex","ts":"...","type":"message","content":"Thanks, will integrate today"}
 ```
 
-**Security note:** Each user should only have access to their own token. Never store multiple user tokens in the same environment.
+**Security note:** Each user should only have access to their own token.
 
-## Using with Claude Code
+## Using with AI Coding Agents
 
-Install the Claude Code skill from `extras/claude-plugin/skills/atcha/` to use atcha with Claude Code. The skill provides a simplified interface to the CLI commands for common operations like sending messages and checking your inbox.
+### Setup
+
+#### 1. Make your agent aware of Atcha
+
+The command `atcha admin onboard` outputs a brief message explaining that Atcha is active. It is purposefully minimal.
+
+#### 2. Install hooks
+
+(Only supports Claude Code at the moment.)
+
+Running `atcha admin install claude` will add two new hooks to the project's *.claude/settings.local.json*:
+
+- On SessionStart, run `atcha admin prime`. If the env var `ATCHA_TOKEN` is set, this will output the agent's identity and some brief instructions about how to use the Atcha CLI.
+- A PreToolUse hook that checks if the agent has received new messages.
+
+Both hooks stay silent if there is nothing to report -- if no user is logged in or if there are no new messages.
 
 ### Running as a user
 
 Launch Claude Code with a user token to give the agent a specific identity. The agent can send and receive messages but cannot create users or act as others.
 
 ```bash
-ATCHA_TOKEN=$(atcha admin create-token bashir@ --password test) claude
+ATCHA_TOKEN=$(atcha admin create-token --user bashir@ --password test) claude
 ```
 
 The agent never knows the admin password and cannot act as other users.
@@ -124,7 +134,7 @@ atcha
 ├── admin
 │   ├── init [--password <pw>]
 │   ├── status [-q/--quiet]
-│   ├── create-token <address>
+│   ├── create-token --user <address>
 │   ├── password --new <pw>
 │   ├── envs
 │   ├── hints
@@ -153,7 +163,7 @@ atcha admin status
 atcha admin password --new <new>
 
 # Create user token
-atcha admin create-token <address>
+atcha admin create-token --user <address>
 
 # Manage users
 atcha admin users                              # list all users

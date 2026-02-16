@@ -48,12 +48,6 @@ class UserProfile(T.TypedDict):
     updated: str
 
 
-class MessagesState(T.TypedDict, total=False):
-    """Message state stored in state.json."""
-
-    last_read: str
-
-
 # Message type — using dict to avoid TypedDict complexity with reserved keywords
 # Fields: id, thread_id, reply_to (optional), from, from_space (optional),
 #         to, to_space (optional), ts, type, content

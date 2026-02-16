@@ -3,14 +3,14 @@
     "SessionStart": [
       {
         "hooks": [
-          { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/prime.sh" }
+          { "type": "command", "command": "atcha prime" }
         ]
       }
     ],
     "PreCompact": [
       {
         "hooks": [
-          { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/prime.sh" }
+          { "type": "command", "command": "atcha prime" }
         ]
       }
     ]

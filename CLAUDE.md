@@ -10,7 +10,7 @@ The Python CLI (`atcha`) provides a hierarchical command structure with token-ba
 
 A `.atcha/` directory lives at the project root and contains admin config, tokens, and user data. Users authenticate via tokens stored in `$ATCHA_TOKEN`.
 
-Each user gets a directory under `.atcha/users/` with their profile and messages. Sending a message means appending a JSON line directly to the recipient's `inbox.jsonl`. A PostToolUse hook checks for new messages after every tool call.
+Each user gets a directory under `.atcha/users/` with their profile and messages. Sending a message means appending a JSON line directly to the recipient's `inbox.jsonl`. A PreToolUse hook checks for new messages before every tool call, so the agent can act on them before taking its next action.
 
 ### Directory structure
 
@@ -27,8 +27,7 @@ Each user gets a directory under `.atcha/users/` with their profile and messages
         ├── profile.json
         └── messages/
             ├── inbox.jsonl
-            ├── sent.jsonl
-            └── state.json
+            └── sent.jsonl
 ```
 
 ### profile.json
@@ -91,7 +90,7 @@ Examples:
 1. User A (authenticated via token) sends a message to alex
 2. The CLI uses the token to identify the sender and appends to `alex/messages/inbox.jsonl` (using alex's user directory)
 3. A copy goes to sender's `messages/sent.jsonl` atomically
-4. On user B's next tool call, the `check-inbox.sh` hook fires, sees the new message, and prints it to stdout
+4. Before user B's next tool call, the `check-inbox.sh` hook fires, sees the new message, and prints it to stdout
 5. User B runs `/check-messages` (which uses `messages read`) to read and mark messages as read
 
 ### Env vars
@@ -136,9 +135,12 @@ atcha
 ├── admin
 │   ├── status [-q/--quiet]
 │   ├── init [--password <pw>]
-│   ├── create-token <user>
+│   ├── create-token --user <user>
 │   ├── password --new <pw>
 │   ├── envs
+│   ├── install <target>
+│   ├── prime
+│   ├── onboard
 │   ├── users
 │   │   ├── create --name <n> --role <r> [--status] [--about] [--tags]
 │   │   ├── update <address> [--status] [--about] [--tags]
@@ -247,7 +249,7 @@ The `send` command writes to both recipient's inbox and sender's sent log. If th
 
 An MCP server would give cleaner tool APIs and in-memory state, but it introduces a running process that must be started before agents and kept alive. The filesystem is already shared infrastructure — it doesn't crash, doesn't need a port, and works across worktrees.
 
-### Why the hook marks messages as read
+### Why the hook doesn't mark messages as read
 
 The `check-inbox.sh` hook uses `messages check` to detect new messages, then `messages` (list) to get IDs, then `messages read` to read and mark them. Users see each message once. Use `messages check` for a summary without marking as read, or bare `messages` for full details without marking as read.
 
@@ -281,7 +283,7 @@ The `check-inbox.sh` hook uses `messages check` to detect new messages, then `me
 |------|---------|
 | `extras/claude-plugin/skills/atcha/` | Claude Code skill |
 | `extras/claude-plugin/hooks/session-start.sh` | Auto-discover `.atcha/`, show identity |
-| `extras/claude-plugin/hooks/check-inbox.sh` | PostToolUse — surface new messages |
+| `extras/claude-plugin/hooks/check-inbox.sh` | PreToolUse — surface new messages |
 | `tests/test_atcha.py` | pytest tests for CLI |
 | `tests/test_help.py` | pytest tests for custom help formatting |
 
@@ -310,7 +312,7 @@ export ATCHA_ADMIN_PASS=mypassword
 atcha admin users create --name maya --role "Backend Engineer"
 
 # Get user token and use it
-export ATCHA_TOKEN=$(atcha admin create-token maya@)
+export ATCHA_TOKEN=$(atcha admin create-token --user maya@)
 
 # Check your identity
 atcha whoami

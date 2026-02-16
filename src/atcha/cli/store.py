@@ -195,9 +195,6 @@ def _ensure_user_dir(atcha_dir: Path, user_id: str) -> Path:
         f = messages_dir / name
         if not f.exists():
             f.touch()
-    state = messages_dir / "state.json"
-    if not state.exists():
-        _ = state.write_text("{}\n")
     return user_dir
 
 
