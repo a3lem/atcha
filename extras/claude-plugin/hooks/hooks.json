@@ -10,7 +10,7 @@
     "PreToolUse": [
       {
         "hooks": [
-          { "type": "command", "command": "python3 extras/claude-plugin/hooks/check-inbox.py" }
+          { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/scripts/check-inbox.py"}
         ]
       }
     ]
