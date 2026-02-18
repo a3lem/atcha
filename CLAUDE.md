@@ -138,7 +138,6 @@ atcha
 │   ├── create-token --user <user>
 │   ├── password --new <pw>
 │   ├── envs
-│   ├── install <target>
 │   ├── prime
 │   ├── onboard
 │   ├── users

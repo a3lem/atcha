@@ -776,14 +776,20 @@ class TestMessagesCheck:
 
 
 class TestMessagesRead:
-    def test_requires_ids(self, atcha_dir: Path) -> None:
-        """messages read without IDs returns an error."""
+    def test_requires_ids_or_all(self, atcha_dir: Path) -> None:
+        """messages read without IDs or --all returns an error when inbox has messages."""
         cwd = atcha_dir.parent
+        sender_token = _create_user(atcha_dir, "sender")
         user_token = _create_user(atcha_dir, "test-user")
-        env = {"ATCHA_TOKEN": user_token, "ATCHA_DIR": str(atcha_dir)}
 
+        # Put a message in the inbox so we reach the ID check
+        sender_env = {"ATCHA_TOKEN": sender_token, "ATCHA_DIR": str(atcha_dir)}
+        _ = run_cli("send", "--to", "test-user", "Hello!", env=sender_env, cwd=str(cwd))
+
+        env = {"ATCHA_TOKEN": user_token, "ATCHA_DIR": str(atcha_dir)}
         result = run_cli("messages", "read", env=env, cwd=str(cwd))
         assert result.returncode != 0
+        assert "at least one message ID required" in result.stderr
 
     def test_reads_and_marks(self, atcha_dir: Path) -> None:
         cwd = atcha_dir.parent
@@ -800,20 +806,27 @@ class TestMessagesRead:
         inbox = _user_dir(atcha_dir, "recipient", "Test Agent") / "messages" / "inbox.jsonl"
         msg_id: str = json.loads(inbox.read_text().strip())["id"]
 
-        # Read by ID
+        # Read by ID (markdown output by default)
         recipient_env = {"ATCHA_TOKEN": recipient_token, "ATCHA_DIR": str(atcha_dir)}
         result = run_cli("messages", "read", msg_id, env=recipient_env, cwd=str(cwd))
         assert result.returncode == 0
-        msg: dict[str, str] = json.loads(result.stdout.strip())
-        assert msg["from"] == "sender"
-        assert msg["content"] == "Hello!"
+        assert "sender" in result.stdout
+        assert "Hello!" in result.stdout
+
+        # Verify JSON output still works via --json
+        result = run_cli("messages", "--json", "read", msg_id, "--no-mark", env=recipient_env, cwd=str(cwd))
+        assert result.returncode == 0
+        msgs: list[dict[str, str]] = json.loads(result.stdout)
+        assert len(msgs) == 1
+        assert msgs[0]["from"] == "sender"
+        assert msgs[0]["content"] == "Hello!"
 
         # Should be marked as read now
         result = run_cli("messages", "check", env=recipient_env, cwd=str(cwd))
         assert "No messages" in result.stdout
 
     def test_excludes_to_field_by_default(self, atcha_dir: Path) -> None:
-        """messages read excludes 'to' field for regular agents (it's redundant)."""
+        """messages read --json excludes 'to' field for regular agents (it's redundant)."""
         cwd = atcha_dir.parent
         sender_token = _create_user(atcha_dir, "sender")
         recipient_token = _create_user(atcha_dir, "recipient")
@@ -826,16 +839,17 @@ class TestMessagesRead:
         inbox = _user_dir(atcha_dir, "recipient", "Test Agent") / "messages" / "inbox.jsonl"
         msg_id: str = json.loads(inbox.read_text().strip())["id"]
 
-        # Read by ID - 'to' should NOT be in output
+        # Read by ID with --json - 'to' should NOT be in output
         recipient_env = {"ATCHA_TOKEN": recipient_token, "ATCHA_DIR": str(atcha_dir)}
-        result = run_cli("messages", "read", msg_id, env=recipient_env, cwd=str(cwd))
+        result = run_cli("messages", "--json", "read", msg_id, env=recipient_env, cwd=str(cwd))
         assert result.returncode == 0
-        msg: dict[str, str] = json.loads(result.stdout.strip())
-        assert "to" not in msg
-        assert msg["from"] == "sender"
+        msgs: list[dict[str, str]] = json.loads(result.stdout)
+        assert len(msgs) == 1
+        assert "to" not in msgs[0]
+        assert msgs[0]["from"] == "sender"
 
     def test_includes_to_field_for_admin(self, atcha_dir: Path) -> None:
-        """messages read includes 'to' field when admin uses --as-user."""
+        """messages read --json includes 'to' field when admin uses --as-user."""
         cwd = atcha_dir.parent
         sender_token = _create_user(atcha_dir, "sender")
         _, recipient_id = _create_user_full(atcha_dir, "recipient")
@@ -850,10 +864,11 @@ class TestMessagesRead:
 
         # Read as admin acting as recipient (--as-user requires user ID)
         admin_env = _admin_env(atcha_dir)
-        result = run_cli("messages", f"--as-user={recipient_id}", "read", msg_id, env=admin_env, cwd=str(cwd))
+        result = run_cli("messages", "--json", f"--as-user={recipient_id}", "read", msg_id, env=admin_env, cwd=str(cwd))
         assert result.returncode == 0
-        msg: dict[str, T.Any] = json.loads(result.stdout.strip())
-        assert msg["to"] == ["recipient"]
+        msgs: list[dict[str, T.Any]] = json.loads(result.stdout)
+        assert len(msgs) == 1
+        assert msgs[0]["to"] == ["recipient"]
 
     def test_no_mark_flag(self, atcha_dir: Path) -> None:
         """--no-mark prevents marking messages as read."""
@@ -899,10 +914,114 @@ class TestMessagesRead:
         recipient_env = {"ATCHA_TOKEN": recipient_token, "ATCHA_DIR": str(atcha_dir)}
         result = run_cli("messages", "read", msg1["id"], env=recipient_env, cwd=str(cwd))
         assert result.returncode == 0
-        # Should have exactly 1 line of output
-        output_lines = [l for l in result.stdout.strip().split("\n") if l]
-        assert len(output_lines) == 1
         assert "First message" in result.stdout
+        assert "Second message" not in result.stdout
+
+    def test_read_all(self, atcha_dir: Path) -> None:
+        """--all reads and marks all unread messages."""
+        cwd = atcha_dir.parent
+        sender_token = _create_user(atcha_dir, "sender")
+        recipient_token = _create_user(atcha_dir, "recipient")
+
+        # Send two messages
+        sender_env = {"ATCHA_TOKEN": sender_token, "ATCHA_DIR": str(atcha_dir)}
+        _ = run_cli("send", "--to", "recipient", "First message", env=sender_env, cwd=str(cwd))
+        _ = run_cli("send", "--to", "recipient", "Second message", env=sender_env, cwd=str(cwd))
+
+        # Read all
+        recipient_env = {"ATCHA_TOKEN": recipient_token, "ATCHA_DIR": str(atcha_dir)}
+        result = run_cli("messages", "read", "--all", env=recipient_env, cwd=str(cwd))
+        assert result.returncode == 0
+        assert "First message" in result.stdout
+        assert "Second message" in result.stdout
+
+        # All should be marked as read now
+        result = run_cli("messages", "check", env=recipient_env, cwd=str(cwd))
+        assert "No messages" in result.stdout
+
+    def test_read_all_skips_already_read(self, atcha_dir: Path) -> None:
+        """--all only reads unread messages, skips already-read ones."""
+        cwd = atcha_dir.parent
+        sender_token = _create_user(atcha_dir, "sender")
+        recipient_token = _create_user(atcha_dir, "recipient")
+
+        # Send two messages
+        sender_env = {"ATCHA_TOKEN": sender_token, "ATCHA_DIR": str(atcha_dir)}
+        _ = run_cli("send", "--to", "recipient", "First message", env=sender_env, cwd=str(cwd))
+        _ = run_cli("send", "--to", "recipient", "Second message", env=sender_env, cwd=str(cwd))
+
+        # Read first message by ID to mark it as read
+        inbox = _user_dir(atcha_dir, "recipient", "Test Agent") / "messages" / "inbox.jsonl"
+        msg1_id: str = json.loads(inbox.read_text().strip().split("\n")[0])["id"]
+        recipient_env = {"ATCHA_TOKEN": recipient_token, "ATCHA_DIR": str(atcha_dir)}
+        _ = run_cli("messages", "read", msg1_id, env=recipient_env, cwd=str(cwd))
+
+        # Read --all should only get the second message
+        result = run_cli("messages", "--json", "read", "--all", env=recipient_env, cwd=str(cwd))
+        assert result.returncode == 0
+        msgs: list[dict[str, T.Any]] = json.loads(result.stdout)
+        assert len(msgs) == 1
+        assert msgs[0]["content"] == "Second message"
+
+    def test_read_all_empty_inbox(self, atcha_dir: Path) -> None:
+        """--all on empty inbox exits silently."""
+        cwd = atcha_dir.parent
+        user_token = _create_user(atcha_dir, "test-user")
+        env = {"ATCHA_TOKEN": user_token, "ATCHA_DIR": str(atcha_dir)}
+        result = run_cli("messages", "read", "--all", env=env, cwd=str(cwd))
+        assert result.returncode == 0
+
+    def test_markdown_output(self, atcha_dir: Path) -> None:
+        """Default messages read output is compact markdown."""
+        cwd = atcha_dir.parent
+        sender_token = _create_user(atcha_dir, "sender")
+        recipient_token = _create_user(atcha_dir, "recipient")
+
+        sender_env = {"ATCHA_TOKEN": sender_token, "ATCHA_DIR": str(atcha_dir)}
+        _ = run_cli("send", "--to", "recipient", "Hello world!", env=sender_env, cwd=str(cwd))
+
+        inbox = _user_dir(atcha_dir, "recipient", "Test Agent") / "messages" / "inbox.jsonl"
+        msg_id: str = json.loads(inbox.read_text().strip())["id"]
+
+        recipient_env = {"ATCHA_TOKEN": recipient_token, "ATCHA_DIR": str(atcha_dir)}
+        result = run_cli("messages", "read", msg_id, env=recipient_env, cwd=str(cwd))
+        assert result.returncode == 0
+        # Should contain markdown formatting
+        assert "**From:** sender" in result.stdout
+        assert msg_id in result.stdout
+        assert "Hello world!" in result.stdout
+        assert "---" in result.stdout
+
+
+class TestMessagesCheckHook:
+    def test_hook_output_with_messages(self, atcha_dir: Path) -> None:
+        """--hook outputs <atcha> tagged directive when there are unread messages."""
+        cwd = atcha_dir.parent
+        sender_token = _create_user(atcha_dir, "sender")
+        recipient_token = _create_user(atcha_dir, "recipient")
+
+        sender_env = {"ATCHA_TOKEN": sender_token, "ATCHA_DIR": str(atcha_dir)}
+        _ = run_cli("send", "--to", "recipient", "Hello!", env=sender_env, cwd=str(cwd))
+
+        recipient_env = {"ATCHA_TOKEN": recipient_token, "ATCHA_DIR": str(atcha_dir)}
+        result = run_cli("messages", "check", "--hook", env=recipient_env, cwd=str(cwd))
+        assert result.returncode == 0
+        assert "<atcha>" in result.stdout
+        assert "</atcha>" in result.stdout
+        assert "atcha messages read " in result.stdout
+        assert "These are for you" in result.stdout
+        assert "**sender**" in result.stdout
+        assert "Hello!" in result.stdout
+
+    def test_hook_silent_no_messages(self, atcha_dir: Path) -> None:
+        """--hook is silent when there are no unread messages."""
+        cwd = atcha_dir.parent
+        user_token = _create_user(atcha_dir, "test-user")
+        env = {"ATCHA_TOKEN": user_token, "ATCHA_DIR": str(atcha_dir)}
+
+        result = run_cli("messages", "check", "--hook", env=env, cwd=str(cwd))
+        assert result.returncode == 0
+        assert result.stdout == ""
 
 
 # ---------- messages list ----------
@@ -910,7 +1029,7 @@ class TestMessagesRead:
 
 class TestMessagesList:
     def test_returns_json_array(self, atcha_dir: Path) -> None:
-        """messages list returns JSON array."""
+        """messages --json list returns JSON array."""
         cwd = atcha_dir.parent
         sender_token = _create_user(atcha_dir, "sender")
         recipient_token = _create_user(atcha_dir, "recipient")
@@ -920,17 +1039,37 @@ class TestMessagesList:
         _ = run_cli("send", "--to", "recipient", "First message", env=sender_env, cwd=str(cwd))
         _ = run_cli("send", "--to", "recipient", "Second message", env=sender_env, cwd=str(cwd))
 
-        # List messages
+        # List messages (--json for structured output)
         recipient_env = {"ATCHA_TOKEN": recipient_token, "ATCHA_DIR": str(atcha_dir)}
-        result = run_cli("messages", env=recipient_env, cwd=str(cwd))
+        result = run_cli("messages", "--json", env=recipient_env, cwd=str(cwd))
         assert result.returncode == 0
 
         messages: list[dict[str, T.Any]] = json.loads(result.stdout)
         assert isinstance(messages, list)
         assert len(messages) == 2
 
+    def test_markdown_list(self, atcha_dir: Path) -> None:
+        """messages list outputs compact markdown by default."""
+        cwd = atcha_dir.parent
+        sender_token = _create_user(atcha_dir, "sender")
+        recipient_token = _create_user(atcha_dir, "recipient")
+
+        # Send messages
+        sender_env = {"ATCHA_TOKEN": sender_token, "ATCHA_DIR": str(atcha_dir)}
+        _ = run_cli("send", "--to", "recipient", "First message", env=sender_env, cwd=str(cwd))
+        _ = run_cli("send", "--to", "recipient", "Second message", env=sender_env, cwd=str(cwd))
+
+        # List messages (default markdown output)
+        recipient_env = {"ATCHA_TOKEN": recipient_token, "ATCHA_DIR": str(atcha_dir)}
+        result = run_cli("messages", env=recipient_env, cwd=str(cwd))
+        assert result.returncode == 0
+        # Compact markdown lines start with "- **sender**"
+        assert "- **sender**" in result.stdout
+        assert "First message" in result.stdout
+        assert "Second message" in result.stdout
+
     def test_preview_truncation(self, atcha_dir: Path) -> None:
-        """messages list truncates content to preview."""
+        """messages --json list truncates content to preview."""
         cwd = atcha_dir.parent
         sender_token = _create_user(atcha_dir, "sender")
         recipient_token = _create_user(atcha_dir, "recipient")
@@ -940,9 +1079,9 @@ class TestMessagesList:
         sender_env = {"ATCHA_TOKEN": sender_token, "ATCHA_DIR": str(atcha_dir)}
         _ = run_cli("send", "--to", "recipient", long_message, env=sender_env, cwd=str(cwd))
 
-        # List messages
+        # List messages with --json
         recipient_env = {"ATCHA_TOKEN": recipient_token, "ATCHA_DIR": str(atcha_dir)}
-        result = run_cli("messages", env=recipient_env, cwd=str(cwd))
+        result = run_cli("messages", "--json", env=recipient_env, cwd=str(cwd))
         assert result.returncode == 0
 
         messages: list[dict[str, T.Any]] = json.loads(result.stdout)
@@ -952,7 +1091,7 @@ class TestMessagesList:
         assert "content" not in messages[0]
 
     def test_no_preview_flag(self, atcha_dir: Path) -> None:
-        """--no-preview shows full content."""
+        """--no-preview --json shows full content."""
         cwd = atcha_dir.parent
         sender_token = _create_user(atcha_dir, "sender")
         recipient_token = _create_user(atcha_dir, "recipient")
@@ -961,9 +1100,9 @@ class TestMessagesList:
         sender_env = {"ATCHA_TOKEN": sender_token, "ATCHA_DIR": str(atcha_dir)}
         _ = run_cli("send", "--to", "recipient", "Hello world", env=sender_env, cwd=str(cwd))
 
-        # List with --no-preview
+        # List with --no-preview --json
         recipient_env = {"ATCHA_TOKEN": recipient_token, "ATCHA_DIR": str(atcha_dir)}
-        result = run_cli("messages", "--no-preview", env=recipient_env, cwd=str(cwd))
+        result = run_cli("messages", "--no-preview", "--json", env=recipient_env, cwd=str(cwd))
         assert result.returncode == 0
 
         messages: list[dict[str, T.Any]] = json.loads(result.stdout)
@@ -986,8 +1125,7 @@ class TestMessagesList:
         recipient_env = {"ATCHA_TOKEN": recipient_token, "ATCHA_DIR": str(atcha_dir)}
         result = run_cli("messages", env=recipient_env, cwd=str(cwd))
         assert result.returncode == 0
-        messages: list[dict[str, T.Any]] = json.loads(result.stdout)
-        assert len(messages) == 1
+        assert "Hello!" in result.stdout
 
         # Check should still show unread
         result = run_cli("messages", "check", env=recipient_env, cwd=str(cwd))
@@ -1004,9 +1142,9 @@ class TestMessagesList:
         for i in range(5):
             _ = run_cli("send", "--to", "recipient", f"Message {i}", env=sender_env, cwd=str(cwd))
 
-        # List with limit
+        # List with limit and --json
         recipient_env = {"ATCHA_TOKEN": recipient_token, "ATCHA_DIR": str(atcha_dir)}
-        result = run_cli("messages", "--limit=2", env=recipient_env, cwd=str(cwd))
+        result = run_cli("messages", "--limit=2", "--json", env=recipient_env, cwd=str(cwd))
         assert result.returncode == 0
 
         messages: list[dict[str, T.Any]] = json.loads(result.stdout)
@@ -1025,9 +1163,9 @@ class TestMessagesList:
         _ = run_cli("send", "--to", "recipient", "From alice", env=alice_env, cwd=str(cwd))
         _ = run_cli("send", "--to", "recipient", "From bob", env=bob_env, cwd=str(cwd))
 
-        # Filter by alice
+        # Filter by alice (--json for structured assertions)
         recipient_env = {"ATCHA_TOKEN": recipient_token, "ATCHA_DIR": str(atcha_dir)}
-        result = run_cli("messages", "--from=alice", env=recipient_env, cwd=str(cwd))
+        result = run_cli("messages", "--from=alice", "--json", env=recipient_env, cwd=str(cwd))
         assert result.returncode == 0
 
         messages: list[dict[str, T.Any]] = json.loads(result.stdout)
@@ -1406,11 +1544,12 @@ class TestIntegration:
         # 7. Alex reads messages (get IDs from inbox first)
         alex_inbox = _user_dir(atcha_dir, "alex-frontend", "Frontend Dev") / "messages" / "inbox.jsonl"
         alex_msg_id: str = json.loads(alex_inbox.read_text().strip())["id"]
-        result = run_cli("messages", "read", alex_msg_id, env=alex_env, cwd=str(tmp_path))
+        result = run_cli("messages", "--json", "read", alex_msg_id, env=alex_env, cwd=str(tmp_path))
         assert result.returncode == 0
-        msg: dict[str, T.Any] = json.loads(result.stdout.strip())
-        assert msg["from"] == "maya-backend"  # CLI output has from as formatted string
-        assert msg["content"] == "API is ready for integration"
+        msgs: list[dict[str, T.Any]] = json.loads(result.stdout)
+        assert len(msgs) == 1
+        assert msgs[0]["from"] == "maya-backend"  # CLI output has from as formatted string
+        assert msgs[0]["content"] == "API is ready for integration"
 
         # 8. Inbox should be empty now
         result = run_cli("messages", "check", env=alex_env, cwd=str(tmp_path))
@@ -1423,10 +1562,11 @@ class TestIntegration:
         # 10. Maya reads reply (get ID from inbox)
         maya_inbox = _user_dir(atcha_dir, "maya-backend", "Backend Engineer") / "messages" / "inbox.jsonl"
         maya_msg_id: str = json.loads(maya_inbox.read_text().strip())["id"]
-        result = run_cli("messages", "read", maya_msg_id, env=maya_env, cwd=str(tmp_path))
-        msg = json.loads(result.stdout.strip())
-        assert msg["from"] == "alex-frontend"
-        assert "integration" in msg["content"]
+        result = run_cli("messages", "--json", "read", maya_msg_id, env=maya_env, cwd=str(tmp_path))
+        msgs = json.loads(result.stdout)
+        assert len(msgs) == 1
+        assert msgs[0]["from"] == "alex-frontend"
+        assert "integration" in msgs[0]["content"]
 
 
 # ---------- Federation ----------
@@ -1721,12 +1861,13 @@ class TestFederationMessaging:
         remote_inbox = remote_atcha / "users" / _make_user_id("remote-user", "Remote Dev") / "messages" / "inbox.jsonl"
         remote_msg_id: str = json.loads(remote_inbox.read_text().strip())["id"]
         remote_user_env = {"ATCHA_TOKEN": remote_token, "ATCHA_DIR": str(remote_atcha)}
-        result = run_cli("messages", "read", remote_msg_id, env=remote_user_env, cwd=str(federation_base / "remote-project"))
+        result = run_cli("messages", "--json", "read", remote_msg_id, env=remote_user_env, cwd=str(federation_base / "remote-project"))
         assert result.returncode == 0
-        msg = json.loads(result.stdout.strip())
-        assert "Hello from local!" in msg["content"]
+        msgs = json.loads(result.stdout)
+        assert len(msgs) == 1
+        assert "Hello from local!" in msgs[0]["content"]
         # Sender should show with @space suffix
-        assert "@" in msg["from"]
+        assert "@" in msgs[0]["from"]
 
     def test_send_ambiguous_recipient(self, atcha_dir: Path, federation_base: Path) -> None:
         """send errors on ambiguous recipient across spaces."""
@@ -1789,10 +1930,11 @@ class TestFederationMessaging:
         local_inbox = _user_dir(atcha_dir, "local-user", "Test Agent") / "messages" / "inbox.jsonl"
         local_msg_id: str = json.loads(local_inbox.read_text().strip())["id"]
         user_env = {"ATCHA_TOKEN": local_token, "ATCHA_DIR": str(atcha_dir)}
-        result = run_cli("messages", "read", local_msg_id, env=user_env, cwd=str(cwd))
+        result = run_cli("messages", "--json", "read", local_msg_id, env=user_env, cwd=str(cwd))
         assert result.returncode == 0
-        msg = json.loads(result.stdout.strip())
-        assert "@" in msg["from"]
+        msgs = json.loads(result.stdout)
+        assert len(msgs) == 1
+        assert "@" in msgs[0]["from"]
 
     def test_from_filter_cross_space(self, atcha_dir: Path, federation_base: Path) -> None:
         """--from=name@space filters cross-space messages correctly."""
@@ -1835,20 +1977,20 @@ class TestFederationMessaging:
 
         # Read with --from=remote-user@remote-handle: should only get the cross-space msg
         user_env = {"ATCHA_TOKEN": local_token, "ATCHA_DIR": str(atcha_dir)}
-        result = run_cli("messages", f"--from=remote-user@{remote_handle}", env=user_env, cwd=str(cwd))
+        result = run_cli("messages", f"--from=remote-user@{remote_handle}", "--json", env=user_env, cwd=str(cwd))
         assert result.returncode == 0
         messages = json.loads(result.stdout)
         assert len(messages) == 1
         assert "Cross-space" in messages[0].get("preview", messages[0].get("content", ""))
 
         # --from=remote-user@wrong-space should return nothing
-        result = run_cli("messages", "--from=remote-user@wrong-space", env=user_env, cwd=str(cwd))
+        result = run_cli("messages", "--from=remote-user@wrong-space", "--json", env=user_env, cwd=str(cwd))
         assert result.returncode == 0
         messages = json.loads(result.stdout)
         assert len(messages) == 0
 
         # --from=remote-user (bare name) should still match the cross-space message
-        result = run_cli("messages", "--from=remote-user", env=user_env, cwd=str(cwd))
+        result = run_cli("messages", "--from=remote-user", "--json", env=user_env, cwd=str(cwd))
         assert result.returncode == 0
         messages = json.loads(result.stdout)
         assert len(messages) == 1
@@ -1912,10 +2054,9 @@ class TestFederationBackwardCompat:
 
         # Read message by ID - should work without errors
         recipient_env = {"ATCHA_TOKEN": recipient_token, "ATCHA_DIR": str(atcha_dir)}
-        result = run_cli("messages", "read", "msg-old12345", env=recipient_env, cwd=str(cwd))
+        result = run_cli("messages", "--json", "read", "msg-old12345", env=recipient_env, cwd=str(cwd))
         assert result.returncode == 0
-        # Output from "messages read" formats from as a string, not dict
-        # Should not have @space suffix (local message)
-        msg = json.loads(result.stdout.strip())
-        assert msg["from"] == "sender"
-        assert "@" not in msg["from"]
+        msgs = json.loads(result.stdout)
+        assert len(msgs) == 1
+        assert msgs[0]["from"] == "sender"
+        assert "@" not in msgs[0]["from"]

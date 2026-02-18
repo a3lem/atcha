@@ -23,6 +23,15 @@ from atcha.cli.store import (
 from atcha.cli._types import AuthContext, Message
 
 
+_PREVIEW_LENGTH = 60
+
+
+def _truncate(text: str, max_len: int = _PREVIEW_LENGTH) -> str:
+    """Truncate text with ellipsis if longer than max_len."""
+    if len(text) > max_len:
+        return text[:max_len] + "..."
+    return text
+
 
 def cmd_messages_check(auth: AuthContext, args: argparse.Namespace) -> None:
     """Check inbox summary."""
@@ -90,6 +99,34 @@ def cmd_messages_check(auth: AuthContext, args: argparse.Namespace) -> None:
 
     if auth.json_output:
         print(json.dumps({"count": count, "senders": sender_counts}))
+    elif hook_mode:
+        # Hook mode: directive output with <atcha> tags so agents can identify
+        # the source and act on it immediately.
+        noun = "message" if count == 1 else "messages"
+        msg_ids = " ".join(m["id"] for m in messages)
+        lines: list[str] = [
+            "<atcha>",
+            f"You have {count} unread {noun} in your inbox.",
+            "These are for you — read and respond directly.",
+            "",
+        ]
+        for m in messages:
+            formatted_sender, warning = _format_sender(m, local_space["id"], federation)
+            if warning:
+                warnings.add(warning)
+            preview = _truncate(T.cast(str, m["content"]))
+            lines.append(f"- **{formatted_sender}** ({m['id']}): {preview}")
+        lines.append("")
+        # Cap shown IDs to avoid an infinitely long command line
+        max_ids = 3
+        if count <= max_ids:
+            lines.append(f"Next: `atcha messages read {msg_ids}`")
+        else:
+            shown_ids = " ".join(m["id"] for m in messages[:max_ids])
+            elided = count - max_ids
+            lines.append(f"Next: `atcha messages read {shown_ids} ...` ({elided} IDs elided)")
+        lines.append("</atcha>")
+        print("\n".join(lines))
     else:
         if count == 1:
             formatted_sender, warning = _format_sender(messages[0], local_space["id"], federation)
@@ -134,15 +171,19 @@ def cmd_messages_read(auth: AuthContext, args: argparse.Namespace) -> None:
     # Parse filter options
     no_mark = T.cast(bool, getattr(args, "no_mark", False))
     quiet = T.cast(bool, getattr(args, "quiet", False))
+    read_all = T.cast(bool, getattr(args, "read_all", False))
     target_ids = T.cast(list[str], getattr(args, "ids", []))
-    if not target_ids:
-        _error("at least one message ID required")
-    target_ids_set = set(target_ids)
+
+    # Must provide either --all or at least one message ID
+    if not read_all and not target_ids:
+        _error("at least one message ID required (or use --all)")
+    target_ids_set = set(target_ids) if target_ids else None
 
     # Read all lines from inbox — we may need to rewrite with updated read flags
     all_lines = inbox.read_text().splitlines()
     matched_any = False
     json_array_msgs: list[dict[str, T.Any]] = []
+    md_parts: list[str] = []
 
     for i, line in enumerate(all_lines):
         if not line.strip():
@@ -152,9 +193,14 @@ def cmd_messages_read(auth: AuthContext, args: argparse.Namespace) -> None:
         except json.JSONDecodeError:
             continue
 
-        # Filter by requested IDs (always required)
-        if msg.get("id") not in target_ids_set:
-            continue
+        # Filter: by explicit IDs, or by --all (match all unread)
+        if target_ids_set is not None:
+            if msg.get("id") not in target_ids_set:
+                continue
+        elif read_all:
+            # --all mode: skip already-read messages
+            if msg["read"]:
+                continue
 
         matched_any = True
 
@@ -182,10 +228,20 @@ def cmd_messages_read(auth: AuthContext, args: argparse.Namespace) -> None:
         if auth.json_output:
             json_array_msgs.append(output)
         else:
-            print(json.dumps(output, separators=(",", ":")))
+            # Compact markdown output: header line + content
+            reply_suffix = ""
+            reply_to = msg.get("reply_to")
+            if reply_to is not None:
+                reply_suffix = f" ↩ {reply_to}"
+            md_parts.append(f"---\n**From:** {formatted_sender} · {msg['id']} · {msg['ts']}{reply_suffix}\n{msg['content']}")
 
-    if not quiet and auth.json_output:
-        print(json.dumps(json_array_msgs, indent=2))
+    if not quiet:
+        if auth.json_output:
+            print(json.dumps(json_array_msgs, indent=2))
+        elif md_parts:
+            # Join with newline between blocks, bookend with separator
+            print("\n".join(md_parts))
+            print("---")
 
     # Rewrite inbox with updated read flags
     if matched_any and not no_mark:
@@ -198,7 +254,7 @@ def cmd_messages_read(auth: AuthContext, args: argparse.Namespace) -> None:
 
 
 def cmd_messages_list(auth: AuthContext, args: argparse.Namespace) -> None:
-    """List messages as JSON array with previews. No side effects."""
+    """List messages with previews. No side effects."""
     atcha_dir, user_id = _require_user(auth)
     user_dir = _get_user_dir(atcha_dir, user_id)
 
@@ -208,7 +264,10 @@ def cmd_messages_list(auth: AuthContext, args: argparse.Namespace) -> None:
     inbox = user_dir / "messages" / "inbox.jsonl"
 
     if not inbox.exists() or inbox.stat().st_size == 0:
-        print("[]")
+        if auth.json_output:
+            print("[]")
+        else:
+            print("No messages")
         return
 
     # Load space info for cross-space sender formatting
@@ -227,6 +286,7 @@ def cmd_messages_list(auth: AuthContext, args: argparse.Namespace) -> None:
     ids_filter = set(ids_filter_raw) if ids_filter_raw else None
 
     messages: list[dict[str, T.Any]] = []
+    md_lines: list[str] = []
 
     for line in inbox.read_text().splitlines():
         if not line.strip():
@@ -255,40 +315,64 @@ def cmd_messages_list(auth: AuthContext, args: argparse.Namespace) -> None:
         if thread_filter and msg.get("thread_id") != thread_filter:
             continue
 
-        # Prepare output
-        if include_to_field:
-            output: dict[str, T.Any] = dict(msg)
-        else:
-            output = {k: v for k, v in msg.items() if k != "to"}
-
         # Format sender with @space suffix if cross-space
         formatted_sender, warning = _format_sender(msg, local_space["id"], federation)
         if warning:
             warnings.add(warning)
-        output["from"] = formatted_sender
 
         content = T.cast(str, msg["content"])
 
-        # Add preview or full content
-        if no_preview:
-            output["content"] = content
-        else:
-            # Truncate to 50 chars with ellipsis
-            if len(content) > 50:
-                output["preview"] = content[:50] + "..."
+        if auth.json_output:
+            # JSON mode: build dict with preview or full content (unchanged behavior)
+            if include_to_field:
+                output: dict[str, T.Any] = dict(msg)
             else:
-                output["preview"] = content
+                output = {k: v for k, v in msg.items() if k != "to"}
+            output["from"] = formatted_sender
 
-        if not no_preview:
-            output.pop("content", None)
+            if no_preview:
+                output["content"] = content
+            else:
+                if len(content) > 50:
+                    output["preview"] = content[:50] + "..."
+                else:
+                    output["preview"] = content
+            if not no_preview:
+                output.pop("content", None)
 
-        messages.append(output)
+            messages.append(output)
+        else:
+            # Markdown mode
+            if no_preview:
+                # Full content in block format (like read output)
+                reply_suffix = ""
+                reply_to = msg.get("reply_to")
+                if reply_to is not None:
+                    reply_suffix = f" ↩ {reply_to}"
+                md_lines.append(f"---\n**From:** {formatted_sender} · {msg['id']} · {msg['ts']}{reply_suffix}\n{content}")
+            else:
+                # Compact one-liner with preview
+                ts = T.cast(str, msg["ts"])
+                # Extract time portion (HH:MM) from ISO timestamp
+                time_part = ts[11:16] if len(ts) > 16 else ts
+                preview = _truncate(content)
+                md_lines.append(f"- **{formatted_sender}** ({msg['id']}, {time_part}): {preview}")
 
         # Check limit
-        if limit and len(messages) >= limit:
+        if limit and len(messages if auth.json_output else md_lines) >= limit:
             break
 
-    print(json.dumps(messages, indent=2))
+    if auth.json_output:
+        print(json.dumps(messages, indent=2))
+    elif md_lines:
+        if no_preview:
+            # Block format with trailing separator
+            print("\n".join(md_lines))
+            print("---")
+        else:
+            print("\n".join(md_lines))
+    else:
+        print("No messages")
 
     # Print warnings for unknown spaces
     for warning in sorted(warnings):

@@ -450,8 +450,9 @@ def _print_user_prime(profile: UserProfile) -> None:
     # --- Overview ---
     parts.append("# atcha (Agent Team Chat)")
     parts.append("")
+    parts.append("You are **{name}** — an AI agent with your own atcha identity.".format(name=profile["name"]))
+    parts.append("Messages sent to you are yours to read and respond to (not your human operator's).")
     parts.append("You are part of a team of AI agents working in parallel on this project.")
-    parts.append("Other agents can message you and you can message them.")
 
     # --- Your identity ---
     parts.append("")
@@ -487,13 +488,22 @@ def _print_user_prime(profile: UserProfile) -> None:
     parts.append("")
     parts.append("```")
     parts.append("atcha send --to <name>@ \"message\"   Send a message")
-    parts.append("atcha messages check                Inbox summary")
-    parts.append("atcha messages                      List unread (get IDs)")
-    parts.append("atcha messages read <id>            Read + mark as read")
-    parts.append("atcha contacts                      List teammates")
+    parts.append("atcha send --broadcast \"message\"     Send to all contacts")
+    parts.append("atcha send --reply-to <id> \"msg\"     Reply to a thread")
+    parts.append("atcha messages check                 Inbox summary")
+    parts.append("atcha messages                       List unread")
+    parts.append("atcha messages read --all             Read all + mark as read")
+    parts.append("atcha messages read <id>             Read specific message")
+    parts.append("atcha contacts                       List teammates")
     parts.append("```")
     parts.append("")
-    parts.append("More options (reply, filter, profile): `/atcha`")
+    parts.append("## Tips")
+    parts.append("")
+    parts.append("- Messages in your inbox are for **you** (the AI agent), not your human operator.")
+    parts.append("- Read new messages promptly — teammates may be blocked waiting for your reply.")
+
+    parts.append("")
+    parts.append("More options (filter, profile): `atcha --help`")
 
     print("\n".join(parts))
 
@@ -503,17 +513,35 @@ def _print_admin_prime() -> None:
 # atcha (Agent Team Chat)
 
 A messaging system for AI agents working in parallel on this project.
-You have **admin** access. You can create users and mint tokens, but cannot send messages.
+You have **admin** access. You can create users, mint tokens, and manage the space.
 
-## Commands
+## User management
 
 ```
-atcha admin users create --name <n> --role "<r>"   Create a user
-atcha admin create-token --user <name>@             Mint a token
-atcha admin users                                  List users
+atcha admin users                                     List all users
+atcha admin users create --name <n> --role "<r>"      Create a user
+atcha admin users update <name>@ --status "..."       Update a user
+atcha admin users delete <name>@                      Remove a user
+atcha admin create-token --user <name>@               Mint a token
 ```
 
-Full admin reference: `/atcha`""")
+## Acting as a user
+
+Use `--as-user <user-id>` on any user command to act on their behalf:
+```
+atcha send --as-user <user-id> --to <name>@ "msg"     Send as a user
+atcha messages --as-user <user-id> check               Check their inbox
+```
+
+## Other admin commands
+
+```
+atcha admin password --new <pw>                        Change password (invalidates all tokens)
+atcha admin spaces update --name "..." --description "..."
+atcha admin spaces add <dir>                           Federate a space
+```
+
+Full reference: `atcha --help`""")
 
 
 def _print_unauthenticated_prime() -> None:
@@ -536,95 +564,13 @@ def cmd_admin_onboard(_auth: AuthContext) -> None:
 ## atcha (Agent Team Chat)
 
 This project uses **atcha** for messaging between parallel AI agent sessions.
+You are an atcha user — messages addressed to you are yours to read and act on.
 You may be working alongside other agents — use atcha to coordinate.
 
 At session start, `atcha admin prime` shows your identity and key commands.
 Run `atcha --help` for the full CLI reference.""")
 
 
-def cmd_admin_install(auth: AuthContext, args: argparse.Namespace) -> None:
-    """Install atcha for a coding agent.
-
-    Currently supports 'claude' (Claude Code). Installs session hooks
-    into settings and prints a reminder to add the onboard snippet to CLAUDE.md.
-    Target validation is handled by argparse (choices).
-    """
-    target = T.cast(str, args.target)
-    assert target == "claude", f"unexpected target: {target}"
-
-    _install_claude_hooks(auth)
-    if not auth.json_output:
-        print()
-        print("Hint: Add the output of `atcha admin onboard` to your CLAUDE.md")
-
-
-def _install_claude_hooks(auth: AuthContext) -> None:
-    """Install atcha hooks for Claude Code.
-
-    Creates or merges into .claude/settings.local.json:
-    - SessionStart: atcha admin prime (fires on start, resume, clear, compact)
-    - PreToolUse: atcha messages check --hook (surfaces new messages)
-    Also adds Bash(atcha:*) to permissions.
-    """
-    settings_path = Path(".claude") / "settings.local.json"
-
-    # Ensure directory exists
-    settings_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Build hooks config — all hooks are direct CLI commands, no scripts needed.
-    # SessionStart fires on new session, resume, /clear, and after compaction,
-    # so no separate PreCompact hook is needed for re-injecting the primer.
-    atcha_hooks = {
-        "SessionStart": [
-            {"hooks": [{"type": "command", "command": "atcha admin prime"}]}
-        ],
-        "PreToolUse": [
-            {"hooks": [{"type": "command", "command": "atcha messages check --hook"}]}
-        ],
-    }
-
-    # Load existing settings or start fresh
-    settings: dict[str, T.Any] = {}
-    if settings_path.exists():
-        try:
-            settings = json.loads(settings_path.read_text())
-        except json.JSONDecodeError:
-            pass  # Overwrite corrupt file
-
-    # Merge hooks — append atcha hooks to any existing hooks per event
-    existing_hooks: dict[str, T.Any] = settings.get("hooks", {})
-    for event, hook_entries in atcha_hooks.items():
-        if event not in existing_hooks:
-            existing_hooks[event] = []
-        # Avoid duplicates: skip if atcha hook already present
-        existing_commands = {
-            h.get("command", "")
-            for entry in existing_hooks[event]
-            for h in entry.get("hooks", [])
-        }
-        for entry in hook_entries:
-            entry_cmd = entry["hooks"][0]["command"]
-            if entry_cmd not in existing_commands:
-                existing_hooks[event].append(entry)
-    settings["hooks"] = existing_hooks
-
-    # Add Bash(atcha:*) permission
-    permissions = settings.setdefault("permissions", {})
-    allow_list: list[str] = permissions.setdefault("allow", [])
-    atcha_perm = "Bash(atcha:*)"
-    if atcha_perm not in allow_list:
-        allow_list.append(atcha_perm)
-
-    _ = settings_path.write_text(json.dumps(settings, indent=2) + "\n")
-
-    if auth.json_output:
-        print(json.dumps({
-            "status": "installed",
-            "target": "claude",
-            "settings": str(settings_path),
-        }))
-    else:
-        print(f"Hooks: {settings_path}")
 
 
 

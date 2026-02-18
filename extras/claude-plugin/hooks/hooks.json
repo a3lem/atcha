@@ -3,14 +3,14 @@
     "SessionStart": [
       {
         "hooks": [
-          { "type": "command", "command": "atcha prime" }
+          { "type": "command", "command": "atcha admin prime" }
         ]
       }
     ],
-    "PreCompact": [
+    "PreToolUse": [
       {
         "hooks": [
-          { "type": "command", "command": "atcha prime" }
+          { "type": "command", "command": "python3 extras/claude-plugin/hooks/check-inbox.py" }
         ]
       }
     ]

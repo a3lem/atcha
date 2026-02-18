@@ -97,15 +97,16 @@ def _build_parser() -> Parsers:
         help="Hook mode: suppress output when no unread messages (saves context tokens)",
     )
 
-    # messages read <msg-id> [msg-id...]
+    # messages read [msg-id...] [--all]
     messages_read = messages_sub.add_parser(
         "read",
         help="Read and mark messages as read",
         description="Read specified messages and mark them as read.",
-        epilog="Examples:\n  atcha messages read msg-abc123\n  atcha messages read msg-abc123 msg-def456",
+        epilog="Examples:\n  atcha messages read msg-abc123\n  atcha messages read msg-abc123 msg-def456\n  atcha messages read --all",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    _ = messages_read.add_argument("ids", nargs="+", metavar="id", help="Message ID to read (one or more)")
+    _ = messages_read.add_argument("ids", nargs="*", metavar="id", help="Message ID to read (one or more)")
+    _ = messages_read.add_argument("--all", action="store_true", dest="read_all", help="Read all unread messages")
     _ = messages_read.add_argument("--no-mark", action="store_true", help="Don't mark messages as read")
     _ = messages_read.add_argument("-q", "--quiet", action="store_true", help="Mark as read without printing output")
 
@@ -276,16 +277,6 @@ def _build_parser() -> Parsers:
         description="Print markdown snippet to add to AGENTS.md/CLAUDE.md, telling agents this project uses atcha.",
         parents=[base_auth],
     )
-
-    # admin install
-    admin_install = admin_sub.add_parser(
-        "install",
-        help="Install atcha for a coding agent (hooks + CLAUDE.md)",
-        description="Install atcha for the specified coding agent: session hooks and CLAUDE.md snippet.\n\nSupported targets:\n  claude    Claude Code (.claude/settings.json hooks + CLAUDE.md)",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        parents=[base_auth],
-    )
-    _ = admin_install.add_argument("target", choices=["claude"], help="Target agent")
 
     # admin spaces (bare = list)
     admin_spaces = admin_sub.add_parser(

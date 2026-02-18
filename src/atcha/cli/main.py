@@ -10,7 +10,6 @@ from atcha.cli.commands.admin import (
     cmd_admin_federated_add,
     cmd_admin_federated_remove,
     cmd_admin_hints,
-    cmd_admin_install,
     cmd_admin_onboard,
     cmd_admin_password,
     cmd_admin_prime,
@@ -127,9 +126,6 @@ def main() -> None:
             cmd_admin_prime(auth)
         elif admin_command == "onboard":
             cmd_admin_onboard(auth)
-        elif admin_command == "install":
-            cmd_admin_install(auth, args)
-
         elif admin_command == "users":
             users_sub = T.cast(str | None, getattr(args, "users_command", None))
             if users_sub == "create":
